@@ -918,16 +918,35 @@ plaintext (`rollout-trace/README.md:3-8`).
 
 ## Milestones
 
-| # | Deliverable |
-|---|---|
-| M0 | Build and run the fork with a tool-call turn. **Done.** |
-| **M1** | **Answer one question. No crate, no production code.** See below. |
-| M2 | The crate: `ProfilerEvent`, live adapter, usage buffering, classification, estimator (with whatever truncation strategy M1 decides), grouping. JSONL writer + scrubber + fixtures land here, where their consumers exist. |
-| M3 | Reconciliation: continuous re-solve, baseline/drift, turn deltas, `InitialContextSummary` |
-| M4 | `/ctx` inline card + `insta` coverage |
-| M5 | Epochs and compaction: sealing, before/after, turns spanning a boundary, compaction-kind inference |
-| M6 | Dogfood on real work; validate attribution; find out which views are actually used |
-| M7 | Rollout hydration - `RolloutItem` adapter, provenance, live-vs-rollout equivalence |
+| # | Deliverable | Status |
+|---|---|---|
+| M0 | Build and run the fork with a tool-call turn | **Done** |
+| M1 | Answer one question. No crate, no production code. See below. | **Done** |
+| M2 | The crate, in four reviewed stages - see below | Next |
+| M3 | Reconciliation: continuous re-solve, baseline/drift, `InitialContextSummary` | |
+| M4 | `/ctx` inline card + `insta` coverage | |
+| M5 | Epochs and compaction: sealing, before/after, turns spanning a boundary, compaction-kind inference | |
+| M6 | Dogfood on real work; validate attribution; find out which views are actually used | |
+| M7 | Rollout hydration - `RolloutItem` adapter, provenance, live-vs-rollout equivalence | |
+
+### M2, staged
+
+Roughly 1,700-2,000 lines with tests - 3-4 changes' worth under `AGENTS.md:127`'s change-size
+guidance, so it lands as four sequential branches off `context-inspector-mvp`, each reviewed as a
+PR against that branch (never `main`, which stays an upstream mirror) and merged with a merge
+commit. Upstream syncs happen on `context-inspector-mvp` only, between stages, never into an open
+branch. Each stage compiles and passes `just test -p codex-context-profiler` at every commit.
+
+| Stage | Branch | Scope (~lines) | Exit criterion |
+|---|---|---|---|
+| M2a | `context-profiler-crate` | Crate skeleton, `BUILD.bazel` + lock update, `ProfilerEvent` and all model types, no logic (~350) | Workspace builds; `just bazel-lock-check` passes |
+| M2b | `profiler-live-adapter` | Scoped `experimental_raw_events`, notification→event, usage buffering, `Lagged` broadcast, `ProfilerRegistry` on `App`, JSONL writer (~500) | A live session's adapter JSONL matches the M1 probe log |
+| M2c | `profiler-accumulator` | Fold, grouping, turn deltas, anchor-delta attribution incl. multi-item apportioning (~500) | Fed the M1 captures, reproduces `analyse_capture.py`'s measured deltas (1,040 / 3,373 / 2,219 / 5,043); handles the interrupted turn's stranded items and the −192 boundary; **shuffled-input test passes** (findings §10.5) |
+| M2d | `profiler-classification` | Classification + unrecognised-fragment counter, estimator with `Reasoning` special-case, scrubber + committed fixtures (~400) | Category totals over the captures are sane; fixtures pass `assert_no_home_paths` |
+
+Ordering is dependency order, and deliberately puts the two exact, provable layers (adapter,
+accumulator) before the fuzzy one (classification, estimation) - a wrong number in M2d is then
+M2d's fault, not something beneath it. M2b is the only stage touching `codex-tui`.
 
 ### M1, re-scoped
 
