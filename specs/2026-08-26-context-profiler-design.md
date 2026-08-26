@@ -1,6 +1,6 @@
 # Context Profiler (`/ctx`) - MVP Design
 
-Status: **approved architecture; Spike C answered, one M1 question open (see Milestones)**
+Status: **M1 complete; M2 is next. Architecture approved, correctness questions answered.**
 Date: 2026-08-26
 Companion: [findings](./2026-08-26-context-profiler-findings.md) - the empirical evidence behind these decisions
 
@@ -142,10 +142,15 @@ would need a protocol change, which the MVP rules out.
 below. We never need the policy, because we measure the difference across an anchor boundary rather
 than reproducing what Codex trimmed.
 
-Spike C also found **no truncation at all** in the measured session, including on a 24,567-byte
-tool output - roughly double the derived threshold. Observed and sent differed by 4-5%, which is
-JSON escaping. That is one session on one model, so it does not prove truncation never fires; it
-does mean the concern is smaller than this section originally implied. Findings §9.1.
+Spike C found **no `ContextManager` truncation at all** across three captures, including on a
+24,567-byte tool output - roughly double the derived threshold.
+
+**The layer that actually fires is the tool's, and it declares itself.** A `cat` of a 373KB file
+never became a 373KB item; the body's own text reads
+`Warning: truncated output (original token count: 103200)`, capped to 40,151 chars before the item
+existed. That is upstream of the raw stream, so both the live feed and the trace already carry the
+capped content - nothing to reproduce. It also hands `/ctx` a feature for free: *"this output was
+cut from 103,200 tokens"*, read straight from the warning. Findings §10.2.
 
 Media items are explicitly **unsupported** in the MVP and marked as such rather than silently
 mis-attributed.
@@ -634,10 +639,24 @@ The estimator survives, but demoted: it apportions measured totals rather than b
 source of per-item numbers. It also **sidesteps truncation entirely** - we never need to know what
 `ContextManager` trimmed, because the delta spans the transformation.
 
-**The new load-bearing assumption is one item per delta.** It held four times out of four, but
-parallel tool calls would break it, and then the delta must be apportioned by estimate across the
-items it covers. Testing that is the next capture's job, and it is the question M2's design hinges
-on.
+**One item per delta held 6/6 across two further captures - but it is a property of code mode,
+not of Codex.** Under code mode the model writes a single script per response, so a response emits
+exactly one tool call however many operations the task needs; asking for three independent file
+reads produced one `wc -l`. Multi-item deltas cannot arise in that configuration, and
+`-c features.code_mode=false` did not disable it (findings §10.3).
+
+So M2 **implements apportioning defensively** - a delta covering several items is split by estimate
+- and tests it with synthetic `ProfilerEvent` sequences rather than a capture. That is cheaper and
+more controllable than fighting the config, and the `<-- MULTI` flag in
+`specs/tools/analyse_capture.py` will catch a real case if M6 dogfooding produces one.
+
+**Two measured caveats on the arithmetic:**
+
+- **It does not hold across turn boundaries.** One capture showed `input(n+1)` *below* `total(n)` by
+  192 tokens - context shrank between turns. Harmless, since tool outputs live within turns, but the
+  accumulator must not treat a negative delta as a bug (findings §10.4).
+- **Interrupted turns strand items past the last anchor.** Those items have no measured cost and can
+  only be estimated (findings §10.1).
 
 ## Reconciliation
 
@@ -783,7 +802,19 @@ never `cargo test` directly. Snapshot review uses `cargo insta pending-snapshots
 
 **1. Accumulator units.** `Vec<ProfilerEvent>` in, whole `ContextSnapshot` asserted out. The first
 test to write is **multiple usage anchors within one turn**, because that is the common case, not
-an edge case. Then: residual establishment at the first anchor, drift updates at later anchors
+an edge case.
+
+**One case is mandatory and comes from experience, not theory.** The M1 analysis script produced
+wrong output twice, and both bugs were the same mistake: *assuming a container's iteration order
+carries meaning*. One paired observed against sent items by dict order (a `-787%` diff); the other
+used a percentage threshold with no absolute floor (an `86% TRUNCATED` verdict on a 382-byte item).
+Neither was caught by a test - both were visible only because a number looked implausible.
+
+The accumulator does exactly this class of work: ordering by `seq`, pairing calls with outputs,
+aligning anchors with the items preceding them. So there must be a test whose input is
+**deliberately shuffled relative to arrival order**, asserting the fold still produces the correct
+result. Without it the same bug reappears somewhere it yields plausible numbers rather than an
+obvious `-787%`. Findings §10.5. Then: residual establishment at the first anchor, drift updates at later anchors
 (named so they do not imply the baseline is permanently fixed), epoch sealing, `call_id` grouping,
 `Resume` epochs, out-of-turn items, anomaly counters.
 
@@ -912,21 +943,18 @@ What M1 actually is:
 
 | Task | Status |
 |---|---|
-| **0. Resolve `TruncationPolicy` reachability** | **Resolved.** Not needed - anchor deltas measure across the transformation. |
-| **3. Spike C** - observed vs sent | **Answered** from surviving Spike B artefacts. No truncation at 24.5KB; anchor deltas give exact per-item costs. Findings §9. |
-| 1. Restore the Spike A probe; scope the raw-events flag to one thread | Needed for tasks 2 and 4 |
-| 2. Capture a session with **parallel tool calls** and a **200KB+ plain-text** output | Open - see below |
-| 4. Capture an interrupted turn | **Spike D** - open |
+| **0. `TruncationPolicy` reachability** | **Resolved** - not needed; anchor deltas measure across the transformation |
+| **Spike C** - observed vs sent | **Answered.** No `ContextManager` truncation in three captures. The tool layer truncates and declares itself. Findings §9.1, §10.2 |
+| **Spike D** - interrupted turn | **Answered.** `status=Interrupted`, no `raw_usage` at all, items stranded past the last anchor. Findings §10.1 |
+| **Q1** - one item per delta | **Answered with a caveat.** Holds 6/6, but as a property of code mode; multi-item deltas are unobservable in this config. Findings §10.3 |
 
-Task 2 changed shape. The original point was measuring truncation magnitude; Spike C answered that.
-The open questions now are:
+**M1 is complete.** Three captures answered every question it was scoped around, and two produced
+findings the milestone was not looking for: the delta arithmetic breaks across turn boundaries
+(§10.4), and the analysis tooling's own bugs dictated a mandatory accumulator test (§10.5).
 
-- **Does one-item-per-delta hold under parallel tool calls?** This is the assumption the new
-  attribution model rests on. If it breaks, deltas must be apportioned by estimate.
-- **Does truncation fire on a plain `Text` body?** Spike C's outputs were all `ContentItems`
-  (`parts` arrays), which take a different code path. A 200KB plain-text output tests the other one.
-
-Exit criteria: both questions answered, plus Spike D. A few days, not a milestone.
+Deliberately **not** pursued: forcing parallel tool calls. `-c features.code_mode=false` did not
+disable code mode, so the next step would be a config investigation rather than a capture - real
+time for a question that only affects a fallback path M2 will implement defensively regardless.
 
 ### Spikes
 

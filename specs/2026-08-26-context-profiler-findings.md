@@ -549,12 +549,116 @@ measure the difference across the boundary. `TruncationPolicy` being unreachable
 parallel tool calls would break it. That is what the next capture must test, and it is now the
 question M2's design hinges on.
 
-## 10. Superseded decisions and corrections
+## 10. M1 captures - Spike D, tool-layer truncation, and the limits of Q1 **[measured]**
+
+Two further captures. Analysis by `specs/tools/analyse_capture.py`.
+
+### 10.1 Spike D - an interrupted turn produces no usage anchor at all
+
+```
+raw_item      kind=CustomToolCall       bytes=525
+raw_usage     input=42648 output=130 total=42778     <- last anchor
+raw_item      kind=CustomToolCallOutput bytes=291
+token_usage   last=42778
+raw_item      kind=Message              bytes=526    <- no usage follows
+turn_done     turn=… status=Interrupted
+```
+
+Three results:
+
+- `TurnStatus::Interrupted` arrives on the wire, confirming `TurnOutcome` should mirror v2
+  vocabulary rather than core's "aborted".
+- **No `raw_usage` line at all** for the final response - not `usage: None`. The notification
+  simply never arrives. The adapter's null-usage branch may therefore be unreachable; keep
+  `missing_usage_count` but expect the real case to be *absent*, not *null*.
+- **Items are stranded past the last anchor.** `CustomToolCallOutput(291)` and `Message(526)` both
+  arrived after the final usage, so they have no measured cost. Anchor-delta attribution has a
+  trailing gap on every interrupted turn, and those items can only be estimated.
+
+### 10.2 Truncation happens at the tool layer, and declares itself
+
+A `cat` of a 373KB file never became a 373KB item. The body's own first lines:
+
+```
+Script completed
+Wall time 0.8 seconds
+Output:
+Warning: truncated output (original token count: 103200)
+```
+
+103,200 tokens capped to 40,151 chars **before the item existed**. `ContextManager` did not
+truncate: observed 46,196 JSON bytes against 40,151 sent chars is JSON escaping, not a cut.
+
+**Impact - better than the mitigation we designed.** There are two truncation layers and the one
+that fires is the tool's, which is upstream of everything we observe. Both the raw stream and the
+trace already carry the capped content, so no reproduction is needed. And because the cap is
+announced in the text, `/ctx` can surface *"this output was cut from 103,200 tokens"* by reading
+the warning - a product feature for free. §8's concern is real in mechanism but was aimed at the
+wrong layer.
+
+### 10.3 Q1 - one item per delta holds under code mode, and cannot be tested against otherwise
+
+Six deltas across two captures, never more than one item. But the condition that would produce a
+multi-item delta never arose, and now we know why it structurally cannot:
+
+```
+custom_tool_call body:
+  {'parts': [{'type': 'code', 'language': 'javascript',
+              'source': 'const r = await tools.exec_command({cmd:"wc -l …'}]}
+```
+
+Under code mode the model writes **one script** that does all its work, so a response emits exactly
+one tool call regardless of how many operations the task needs. Asking for three independent file
+reads produced a single `wc -l`.
+
+`-c features.code_mode=false` **did not disable it** - the second capture still shows JavaScript
+`tools.exec_command` calls and `Script completed` output headers. The correct override is unknown.
+
+**Impact:** recorded as *one-item-per-delta holds under code mode (measured 6/6); multi-item deltas
+remain structurally possible (`parallel_tool_calls: true`) and must be handled, but are not
+observable in this configuration.* M2 implements apportioning defensively and tests it with
+synthetic `ProfilerEvent` sequences rather than a capture - cheaper and more controllable than
+fighting the config. The `<-- MULTI` flag in the analysis script will catch a real case if M6
+dogfooding produces one.
+
+### 10.4 The delta arithmetic does not hold across turn boundaries
+
+```
+turn 1 last total   26,537
+turn 2 first input  26,345      Δ = −192
+```
+
+Context **shrank** by 192 tokens between turns. So `input(n+1) = total(n) + Σ new items` holds
+*within* a turn but not *across* one - something is replaced rather than appended at the boundary.
+
+**Impact:** harmless for attribution, since tool outputs live within turns, but the accumulator must
+not treat a negative delta as a bug. Cause not yet identified; a candidate is context-update
+diffing replacing a fragment with a shorter one.
+
+### 10.5 Two tooling bugs, both found by eye rather than by test
+
+The analysis script produced wrong output twice, and in both cases the error was visible only
+because a number looked implausible:
+
+1. **An 86% "TRUNCATED" verdict** on a 382 → 52 byte item. That is JSON envelope overhead on a tiny
+   payload. A percentage threshold alone is wrong; it needs an absolute floor (now 4KB).
+2. **A −787% diff.** `conversation_items` is a dict whose iteration order does **not** match arrival
+   order, so observed and sent items were paired essentially at random. It looked correct in the
+   first capture purely by luck. Fixed by ordering from `request_item_ids` across the ordered calls.
+
+**Impact on M2's tests, not just the tooling.** The accumulator does exactly this class of work -
+ordering items by `seq`, pairing calls with outputs, aligning anchors with the items preceding
+them. Both bugs are the same mistake: **assuming a container's iteration order carries meaning.**
+So the accumulator's tests must include a case whose input is deliberately shuffled relative to
+arrival order, and assert the fold still produces the correct result. Without it the same bug
+reappears somewhere it produces plausible numbers rather than a −787%.
+
+## 11. Superseded decisions and corrections
 
 The design spec states decisions; this section holds the reasoning for the ones that replaced an
 earlier, wrong answer. Kept here so the spec stays implementable rather than argumentative.
 
-### 10.1 Why the baseline is the first trustworthy anchor, not `min` over early anchors
+### 11.1 Why the baseline is the first trustworthy anchor, not `min` over early anchors
 
 The superseded rule was "baseline ≈ min over early anchors", reasoned as: drift grows with item
 count, so the earliest anchor is least contaminated, so take the minimum.
@@ -567,7 +671,7 @@ Over-estimation is the case to expect: a byte-based estimator over-counts reason
 roughly 28× (§6.5). So the replacement is deterministic - the first anchor of epoch 0 in a `Live`
 session with at least one item observed.
 
-### 10.2 Why `source` and `window_id` cannot live in `ContextSnapshot`
+### 11.2 Why `source` and `window_id` cannot live in `ContextSnapshot`
 
 An earlier draft placed `source: SnapshotSource` and `Epoch::window_id` inside the compared
 snapshot while also specifying strict live-vs-rollout equality. Those are contradictory:
@@ -580,7 +684,7 @@ The same defect recurred twice more before being caught structurally - via
 the compared type contains only what both sources can reproduce, enforced by construction rather
 than by a normalisation method.
 
-### 10.3 Corrections table
+### 11.3 Corrections table
 
 Recorded so they are not silently re-derived.
 
@@ -601,7 +705,7 @@ Recorded so they are not silently re-derived.
 | "Measured baseline" | Reconciled, not measured. Spike B identified the *cause*; the live quantity still comes through our estimator |
 | "The prompt is 0.3% of it" | 0.3% of serialised **bytes** (358/116,100), stated next to a token figure. Per-item token share is unknown |
 | `BASELINE_TOKENS` reproduced inside the profiler crate | It is TUI display policy; keeping it in the profiler leaks the layer boundary we drew |
-| `min over early anchors` for the baseline | Wrong under over-estimation - `min` then picks the most contaminated anchor (§10.1) |
+| `min over early anchors` for the baseline | Wrong under over-estimation - `min` then picks the most contaminated anchor (§11.1) |
 | "Startup context 33,100" quoted as the defensible claim | **Arithmetically impossible.** The whole first request was 25,230 input tokens and contained everything, so startup is necessarily below that. See the process note below (§7.2) |
 | `ContextSnapshot.completeness` | Acquisition quality, not analytic state. A gap-affected live capture and an intact rollout replay describe the same context; moved to `ProfilerState` |
 | `UsageSnapshot.response_id` | Leaked acquisition state back into the compared snapshot via `Epoch::last_usage`. Moved to `UsageAnchor` |
