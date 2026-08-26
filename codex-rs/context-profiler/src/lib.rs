@@ -7,3 +7,16 @@ mod event;
 mod item;
 mod snapshot;
 mod usage;
+
+pub use event::InvalidationReason;
+pub use event::ProfilerEvent;
+pub use item::Category;
+pub use item::GroupKey;
+pub use item::ItemGroup;
+pub use item::ItemSummary;
+pub use snapshot::ContextProfiler;
+pub use snapshot::ContextSnapshot;
+pub use snapshot::InitialContextSummary;
+pub use snapshot::ProfilerState;
+pub use snapshot::TurnDelta;
+pub use usage::UsageSnapshot;
