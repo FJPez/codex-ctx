@@ -1,0 +1,17 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-context-profiler"
+version.workspace = true
+
+[lib]
+name = "codex_context_profiler"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-protocol = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

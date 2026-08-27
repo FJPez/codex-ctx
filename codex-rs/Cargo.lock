@@ -2746,6 +2746,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-context-profiler"
+version = "0.0.0"
+dependencies = [
+ "codex-protocol",
+ "serde",
+]
+
+[[package]]
 name = "codex-core"
 version = "0.0.0"
 dependencies = [

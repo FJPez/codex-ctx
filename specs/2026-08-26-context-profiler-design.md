@@ -284,7 +284,8 @@ for profiler in registry.live_profilers_mut() {
 }
 ```
 
-Every live profile becomes `Incomplete`, because we cannot know which thread lost events. Do not
+Every live profile is invalidated (`invalidated = Some(EventsDropped { .. })`), because we cannot
+know which thread lost events. Do not
 attempt to derive a `thread_id` for this event - there isn't one.
 
 Dropped events are not a hypothetical. The channel is `CHANNEL_CAPACITY = 128`
