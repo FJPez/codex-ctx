@@ -4,6 +4,7 @@ use super::agents_overview_view::AgentsOverviewGroup;
 use super::agents_overview_view::AgentsOverviewRow;
 use super::agents_overview_view::AgentsOverviewView;
 use super::*;
+use crate::app_server_session::ThreadRole;
 use crate::bottom_pane::SelectionDescriptionLayout;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
@@ -610,6 +611,7 @@ impl App {
                 &config,
                 /*session_start_source*/ None,
                 remote_cwd.as_deref(),
+                ThreadRole::Helper,
             )
             .await
         {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::app_event::TranscriptExportDestination;
+use crate::app_server_session::ThreadRole;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_parented_rollout_with_source;
 use app_test_support::create_fake_rollout;
@@ -15,6 +16,7 @@ use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
+use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStatus;
 use codex_protocol::AgentPath;
 use codex_protocol::items::AgentMessageContent;
@@ -968,6 +970,63 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
         assert_eq!(attempts[2]["dynamicTools"], serde_json::Value::Null);
         assert_eq!(attempts[2]["historyMode"], serde_json::Value::Null);
     }
+
+    app_server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_thread_requests_raw_events_when_feature_enabled() -> Result<()> {
+    let (mut app, _codex_home) = make_history_test_app().await?;
+    app.config
+        .features
+        .enable(Feature::ContextProfiler)
+        .expect("test config should allow the context profiler");
+    let (mut app_server, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+
+    app_server.start_thread(&app.config).await?;
+
+    let starts = recorded_params(&requests, "thread/start");
+    let params: ThreadStartParams = serde_json::from_value(starts[0].clone())?;
+    assert!(params.experimental_raw_events);
+
+    app_server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn helper_thread_never_requests_raw_events() -> Result<()> {
+    let (mut app, _codex_home) = make_history_test_app().await?;
+    app.config
+        .features
+        .enable(Feature::ContextProfiler)
+        .expect("test config should allow the context profiler");
+    let (mut app_server, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+
+    app_server
+        .start_thread_with_session_start_source(
+            &app.config,
+            /*session_start_source*/ None,
+            /*remote_cwd_override*/ None,
+            ThreadRole::Helper,
+        )
+        .await?;
+
+    let starts = recorded_params(&requests, "thread/start");
+    let params: ThreadStartParams = serde_json::from_value(starts[0].clone())?;
+    assert!(!params.experimental_raw_events);
 
     app_server.shutdown().await?;
     proxy.await??;

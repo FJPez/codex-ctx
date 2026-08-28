@@ -120,6 +120,7 @@ use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
 use codex_config::ConfigLayerSource;
+use codex_features::Feature;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
@@ -312,6 +313,13 @@ pub(crate) struct AppServerSession {
 pub(crate) enum ThreadParamsMode {
     Embedded,
     Remote,
+}
+
+/// Distinguishes the user-facing thread from threads started on its behalf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadRole {
+    Primary,
+    Helper,
 }
 
 /// Determines where model settings come from when resuming a thread.
@@ -738,7 +746,10 @@ impl AppServerSession {
     #[cfg(test)]
     pub(crate) async fn start_thread(&mut self, config: &Config) -> Result<AppServerStartedThread> {
         self.start_thread_with_session_start_source(
-            config, /*session_start_source*/ None, /*remote_cwd_override*/ None,
+            config,
+            /*session_start_source*/ None,
+            /*remote_cwd_override*/ None,
+            ThreadRole::Primary,
         )
         .await
     }
@@ -748,6 +759,7 @@ impl AppServerSession {
         config: &Config,
         session_start_source: Option<ThreadStartSource>,
         remote_cwd_override: Option<&std::path::Path>,
+        thread_role: ThreadRole,
     ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(config);
@@ -757,6 +769,8 @@ impl AppServerSession {
             remote_cwd_override.or(self.remote_cwd_override.as_deref()),
             session_start_source,
         );
+        params.experimental_raw_events =
+            thread_role == ThreadRole::Primary && config.features.enabled(Feature::ContextProfiler);
         if self.history_support == ThreadHistorySupport::LegacyOnly {
             params.history_mode = None;
         }
@@ -1583,6 +1597,7 @@ pub(crate) async fn start_thread_with_request_handle(
         remote_cwd_override.as_deref(),
         /*session_start_source*/ None,
     );
+    params.experimental_raw_events = config.features.enabled(Feature::ContextProfiler);
     thread_tool_transport.configure(&mut params);
     let (response, _history_support, task_tools_available) =
         request_thread_start_with_history_fallback(&request_handle, request_id, params)

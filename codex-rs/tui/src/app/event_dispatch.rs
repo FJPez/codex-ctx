@@ -9,6 +9,7 @@ use super::*;
 use crate::app_event::RecapTrigger;
 use crate::app_event::ThreadTitleDestination;
 use crate::app_server_session::ForkGoalContinuation;
+use crate::app_server_session::ThreadRole;
 use crate::app_server_session::UnsupportedLegacyPermissionProfile;
 use crate::app_server_session::turn_permissions_overrides;
 use crate::config_update::format_config_error;
@@ -511,8 +512,10 @@ impl App {
                         Ok(_) => {
                             app_server
                                 .start_thread_with_session_start_source(
-                                    &config, /*session_start_source*/ None,
+                                    &config,
+                                    /*session_start_source*/ None,
                                     /*remote_cwd_override*/ None,
+                                    ThreadRole::Primary,
                                 )
                                 .await
                         }
