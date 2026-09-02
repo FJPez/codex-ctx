@@ -62,10 +62,22 @@ def body_text_len(body) -> int:
 # `ResponseItem` variants in declaration order (protocol/src/models.rs:963), so
 # older probe logs that recorded `Discriminant(N)` can still be read.
 DISCRIMINANTS = [
-    "AdditionalTools", "Message", "AgentMessage", "Reasoning", "LocalShellCall",
-    "FunctionCall", "ToolSearchCall", "FunctionCallOutput", "CustomToolCall",
-    "CustomToolCallOutput", "ToolSearchOutput", "WebSearchCall",
-    "ImageGenerationCall", "Compaction", "CompactionTrigger", "ContextCompaction",
+    "AdditionalTools",
+    "Message",
+    "AgentMessage",
+    "Reasoning",
+    "LocalShellCall",
+    "FunctionCall",
+    "ToolSearchCall",
+    "FunctionCallOutput",
+    "CustomToolCall",
+    "CustomToolCallOutput",
+    "ToolSearchOutput",
+    "WebSearchCall",
+    "ImageGenerationCall",
+    "Compaction",
+    "CompactionTrigger",
+    "ContextCompaction",
     "Other",
 ]
 
@@ -95,7 +107,9 @@ def parse_probe(path: Path):
                 record = json.loads(line)
             except json.JSONDecodeError:
                 if i == len(lines) - 1:
-                    print(f"WARNING: truncated final line (interrupted write) in {path}")
+                    print(
+                        f"WARNING: truncated final line (interrupted write) in {path}"
+                    )
                     continue
                 raise SystemExit(f"corrupt trace: malformed JSON at {path}:{i + 1}")
             if record.get("kind") == "item":
@@ -126,7 +140,9 @@ def main() -> int:
 
     bundle = Path(sys.argv[1])
     if not (bundle / "state.json").exists():
-        print(f"no state.json in {bundle} - run `just codex debug trace-reduce {bundle}` first")
+        print(
+            f"no state.json in {bundle} - run `just codex debug trace-reduce {bundle}` first"
+        )
         return 1
 
     state, calls = load_ordered_calls(bundle)
@@ -138,7 +154,9 @@ def main() -> int:
     print("=" * 78)
     print("Q1  items added between consecutive usage anchors")
     print("=" * 78)
-    print(f"{'#':>2} {'input':>8} {'output':>7} {'total':>8} {'Δ':>7} {'n':>3}  items added")
+    print(
+        f"{'#':>2} {'input':>8} {'output':>7} {'total':>8} {'Δ':>7} {'n':>3}  items added"
+    )
 
     prev_total = None
     prev_seen: set[str] = set()
@@ -180,28 +198,37 @@ def main() -> int:
         n_calls = sum(
             1
             for i in call["response_item_ids"]
-            if "call" in items[i]["kind"].lower() and "output" not in items[i]["kind"].lower()
+            if "call" in items[i]["kind"].lower()
+            and "output" not in items[i]["kind"].lower()
         )
         max_calls_per_response = max(max_calls_per_response, n_calls)
 
     if multi:
-        print(f"Q1 ANSWER: NO - {len(multi)} anchor pair(s) carried more than one item.")
+        print(
+            f"Q1 ANSWER: NO - {len(multi)} anchor pair(s) carried more than one item."
+        )
         print("           Deltas must be apportioned by estimate across those items.")
         for n, count, delta in multi:
             print(f"           call {n}: {count} items sharing {delta} tokens")
     elif max_calls_per_response <= 1:
         print("Q1 ANSWER: VACUOUS - no response emitted more than one tool call")
-        print(f"           (max was {max_calls_per_response}), so multi-item deltas could not")
+        print(
+            f"           (max was {max_calls_per_response}), so multi-item deltas could not"
+        )
         print("           arise. Likely code mode wrapping all work in one call.")
         print("           Re-run with code mode disabled to test the other path.")
     else:
         print("Q1 ANSWER: YES - exactly one item per delta, and the capture did")
-        print(f"           contain responses with up to {max_calls_per_response} tool calls.")
+        print(
+            f"           contain responses with up to {max_calls_per_response} tool calls."
+        )
         print("           Per-item token costs are measurable, not estimated.")
 
     if negatives:
         print()
-        print(f"ANOMALY: {len(negatives)} negative delta(s) - context shrank between anchors.")
+        print(
+            f"ANOMALY: {len(negatives)} negative delta(s) - context shrank between anchors."
+        )
         for n, delta in negatives:
             print(f"         call {n}: {delta} tokens")
         print("         `input(n+1) = total(n) + new items` does not hold here.")
@@ -233,7 +260,9 @@ def main() -> int:
         for i in call["request_item_ids"] + call["response_item_ids"]:
             if i not in seen_order:
                 seen_order.append(i)
-    sent_outputs = [items[i] for i in seen_order if "output" in items[i]["kind"].lower()]
+    sent_outputs = [
+        items[i] for i in seen_order if "output" in items[i]["kind"].lower()
+    ]
 
     if not obs_outputs:
         print("no tool-output items found in the probe log")
