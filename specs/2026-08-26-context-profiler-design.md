@@ -385,6 +385,41 @@ The field is deliberately not named `total_tokens`. `ThreadTokenUsage` carries b
 `last` with opposite meanings (`tui/src/token_usage.rs:37`): `total` accumulates across the
 session and exceeds the window on any long thread; `last` tracks occupancy.
 
+### The M2b trace representation
+
+The whole pipeline - and every case in this section, normal and degraded - is diagrammed in
+[2026-09-02-context-reconstruction.md](./2026-09-02-context-reconstruction.md).
+
+M2b writes each observation as one owned, serialize-only `RecordedEvent` line
+(`tui/src/context_profiler/adapter.rs`): `{ thread_id, turn_id, ...kind }` with the kind
+internally tagged snake_case: `attached`, `turn_started`, `item` (variant name, serialized
+bytes, `items_seq`, stamped turn id, `call_id` - never item text), `usage` (response id, token
+fields, `items_seq`), `missing_usage`, `window_updated` (`window`, `matches_anchor`),
+`turn_ended` (`completed`, raw status), `invalidated` (reason). The trace file is
+`<log_dir>/context-profiler-<UTC-ts>-<pid>.jsonl`, append-only, 0o600; a write failure warns
+once and drops the writer - the session is never degraded to protect a trace.
+`specs/tools/analyse_capture.py` reads this format directly, tolerating a malformed final line
+only (an interrupted write; anything earlier is corruption and fails loudly).
+
+The adapter keeps two fields, `items_seq` and `last_anchor_total`, with this survival contract:
+
+| Event | `items_seq` | `last_anchor_total` |
+|---|---|---|
+| `turn_started` | kept | kept (a boundary does not invalidate the pairing) |
+| `item` | +1 | kept |
+| raw usage (`Some`) | kept | replaced (recency pairs correctly when the older counterpart never arrived) |
+| `window_updated` compare | kept | consumed via `Option::take()` - one anchor, one comparison |
+| `missing_usage` | kept | cleared (`matches_anchor: None` = nothing valid to compare, not "false") |
+| `invalidated` | kept - the record IS the segment boundary | cleared |
+| adapter removal then recreation | resets to 0, legible because `attached` precedes it | fresh `None` |
+
+`attached` is trace-lifecycle only, always a new adapter's first record; an `items_seq`
+decrease is valid only immediately after one. There is no `detached` - EOF or a later
+`attached` carries the information. Adapters are created only for the **displayed** thread
+(`ProfilerRegistry::observe`'s `allow_create` gate): helper and subagent threads inherit the
+raw-events flag server-side but are never profiled, and a fork is caught the moment it becomes
+the displayed session, its mid-stream join marked by `attached`.
+
 ### No epochs in the MVP
 
 A previous draft carried `Epoch`, `EpochSummary`, `EpochStartReason`, sealing semantics, a
@@ -1032,6 +1067,10 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
    `replacement_history`, which the live notification does not, but the recorder writes
    asynchronously (`rollout/src/recorder.rs:1971`) so there is no flush guarantee when the
    `ContextCompaction` item arrives.
+4. **`RolloutItem::TokenUsageRecord`** (M7). The upstream sync added a persisted per-response
+   token usage record to the rollout. If it anchors the way `EventMsg::TokenCount` does, M7
+   hydration may get measured per-item costs for the replayed prefix too, not just the live
+   suffix. Assess when M7 starts.
 
 ### Resolved since the first draft
 

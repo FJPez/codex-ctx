@@ -79,9 +79,34 @@ def normalise_kind(kind: str) -> str:
 
 
 def parse_probe(path: Path):
-    """Observed raw-stream item sizes, in arrival order, per kind."""
+    """Observed raw-stream item sizes, in arrival order, per kind.
+
+    Reads either the old probe-log format (`raw_item turn=... kind=... bytes=...`)
+    or a profiler JSONL trace, whose lines start with `{` and carry
+    `{"kind": "item", "item_kind": ..., "bytes": ..., "turn_id": ...}` records.
+    A malformed FINAL line is tolerated (an interrupted write); malformed JSON
+    anywhere else is corruption and fails loudly.
+    """
     observed = []
-    for line in path.read_text().splitlines():
+    lines = path.read_text().splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("{"):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                if i == len(lines) - 1:
+                    print(f"WARNING: truncated final line (interrupted write) in {path}")
+                    continue
+                raise SystemExit(f"corrupt trace: malformed JSON at {path}:{i + 1}")
+            if record.get("kind") == "item":
+                observed.append(
+                    {
+                        "turn": record.get("turn_id"),
+                        "kind": normalise_kind(record["item_kind"]),
+                        "bytes": int(record["bytes"]),
+                    }
+                )
+            continue
         m = re.search(r"raw_item\s+turn=(\S+)\s+kind=(\S+?)\s+.*?bytes=(\d+)", line)
         if m:
             observed.append(
