@@ -193,7 +193,9 @@ fn item_kinds(records: &[RecordedEvent]) -> Vec<(&str, u64)> {
 #[test]
 fn replays_measured_capture() {
     let mut notifications = vec![turn_started()];
-    notifications.extend((1..8).map(|index| raw_item(message_item(&format!("item {index}")))));
+    notifications.extend((1..6).map(|index| raw_item(message_item(&format!("input {index}")))));
+    notifications.push(raw_item(reasoning_item()));
+    notifications.push(raw_item(message_item("commentary")));
     notifications.push(raw_item(custom_tool_call("call_1")));
     notifications.push(raw_usage("resp_a", 25_230, 192));
     notifications.push(raw_item(custom_tool_call_output("call_1")));
@@ -218,7 +220,7 @@ fn replays_measured_capture() {
             ("Message", 3),
             ("Message", 4),
             ("Message", 5),
-            ("Message", 6),
+            ("Reasoning", 6),
             ("Message", 7),
             ("CustomToolCall", 8),
             ("CustomToolCallOutput", 9),

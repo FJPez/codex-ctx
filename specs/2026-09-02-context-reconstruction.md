@@ -53,9 +53,10 @@ sequenceDiagram
     participant M as Model API
     participant C as codex-core
     participant P as Profiler
-    C->>M: request 1 (history, 8 items)
+    C->>M: request 1 (5 input items + hidden scaffolding)
     M-->>C: output items + usage
-    C->>P: items (items_seq 1..8)
+    C->>P: input items (items_seq 1..5)
+    C->>P: response outputs: reasoning, message, tool call (items_seq 6..8)
     C->>P: anchor A: input 25230, output 192, total 25422 (items_seq 8)
     Note over P: pending anchor stored
     C->>P: tool output item (items_seq 9)

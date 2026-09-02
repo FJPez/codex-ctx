@@ -401,6 +401,12 @@ once and drops the writer - the session is never degraded to protect a trace.
 `specs/tools/analyse_capture.py` reads this format directly, tolerating a malformed final line
 only (an interrupted write; anything earlier is corruption and fails loudly).
 
+`items_seq` counts observed raw items only - it is never a server context size. Hidden context
+(base instructions, tool schemas) is request scaffolding *beside* the item list, not a set of
+unobserved items, so no `items_seq` accounting ever includes it; the residual sizes it instead.
+In the live captures the first anchor sits at `items_seq` 8: five input fragments plus the
+response's own reasoning, commentary message, and tool call.
+
 The adapter keeps two fields, `items_seq` and `last_anchor_total`, with this survival contract:
 
 | Event | `items_seq` | `last_anchor_total` |
