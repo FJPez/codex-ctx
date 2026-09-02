@@ -1540,6 +1540,7 @@ impl Session {
     ) -> Option<PreviousTurnSettings> {
         let rollout_reconstruction::RolloutReconstruction {
             mut history,
+            retained_context,
             guardian_history,
             previous_turn_settings,
             reference_context_item,
@@ -1586,6 +1587,7 @@ impl Session {
             state
                 .history
                 .restore_guardian_history(guardian_history.as_ref());
+            state.history.restore_retained_context(&retained_context);
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }
@@ -2889,19 +2891,6 @@ impl Session {
             return Some(response);
         }
 
-        // The interactive approval event remains host-native until its public
-        // app-server/TUI boundary migrates in the next stack stage.
-        let Ok(native_cwd) = cwd.to_abs_path() else {
-            warn!(
-                cwd = %cwd,
-                "request_permissions interactive approval requires a cwd native to the Codex host"
-            );
-            return Some(RequestPermissionsResponse {
-                permissions: RequestPermissionProfile::default(),
-                scope: PermissionGrantScope::Turn,
-                strict_auto_review: false,
-            });
-        };
         let _elicitation = self.services.elicitations.register();
         let (tx_response, rx_response) = oneshot::channel();
         let prev_entry = {
@@ -2932,7 +2921,7 @@ impl Session {
             started_at_ms: now_unix_timestamp_ms(),
             reason: args.reason,
             permissions: requested_permissions,
-            cwd: Some(native_cwd),
+            cwd: Some(cwd.clone().into()),
         });
         self.send_event(turn_context.as_ref(), event).await;
         tokio::select! {
@@ -3760,6 +3749,7 @@ impl Session {
         let mut compacted_item = CompactedItem {
             message: metadata.message,
             replacement_history: Some(items.clone()),
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
             window_number: Some(metadata.window_number),
@@ -3785,6 +3775,7 @@ impl Session {
                 HistoryReplacement::Compaction,
             );
             compacted_item.guardian_history = state.history.guardian_history_checkpoint();
+            compacted_item.retained_context = Some(state.history.retained_context().clone());
             if let Some(world_state) = world_state_baseline {
                 let snapshot = world_state.snapshot();
                 world_state_item = Some(WorldStateItem::full(snapshot.clone().into_object()));

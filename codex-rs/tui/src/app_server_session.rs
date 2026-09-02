@@ -2435,6 +2435,7 @@ mod tests {
         RateLimitSnapshot {
             limit_id: Some(limit_id.to_string()),
             limit_name: None,
+            normal_model_slug: None,
             primary: Some(codex_app_server_protocol::RateLimitWindow {
                 used_percent: 0,
                 window_duration_mins: Some(10_080),
@@ -2518,6 +2519,7 @@ mod tests {
     #[test]
     fn app_server_rate_limit_snapshots_deduplicates_top_level_limit_from_map() {
         let response = GetAccountRateLimitsResponse {
+            ordinary_usage_allowed: None,
             account_id: None,
             rate_limit_upsell: None,
             rate_limits: rate_limit_snapshot("codex"),

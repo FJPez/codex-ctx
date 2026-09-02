@@ -332,7 +332,7 @@ pub enum Feature {
     FastMode,
     /// Enable explicitly requested model changes for later step captures.
     StepModelSwitching,
-    /// Enable experimental realtime voice conversation mode in the TUI.
+    /// Removed compatibility flag. Realtime sessions no longer require a per-thread opt-in.
     RealtimeConversation,
     /// Prevent idle system sleep while a turn is actively running.
     PreventIdleSleep,
@@ -366,6 +366,8 @@ pub enum Feature {
     WindowsSandbox,
     /// Use the elevated Windows sandbox pipeline (setup + runner).
     WindowsSandboxElevated,
+    /// Attempt elevated Windows sandbox provisioning through the installed service.
+    WindowsSandboxService,
     /// Legacy remote models flag kept for backward compatibility.
     RemoteModels,
     /// Removed legacy git commit attribution guidance flag.
@@ -1174,6 +1176,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::WindowsSandboxService,
+        key: "windows_sandbox_service",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::RemoteModels,
         key: "remote_models",
         stage: Stage::Removed,
@@ -1612,7 +1620,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::RealtimeConversation,
         key: "realtime_conversation",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {

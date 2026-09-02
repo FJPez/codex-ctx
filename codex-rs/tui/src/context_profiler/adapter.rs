@@ -316,6 +316,7 @@ fn item_kind(item: &ResponseItem) -> &'static str {
         ResponseItem::ImageGenerationCall { .. } => "ImageGenerationCall",
         ResponseItem::Compaction { .. } => "Compaction",
         ResponseItem::CompactionTrigger { .. } => "CompactionTrigger",
+        ResponseItem::ConfigurationUpdate { .. } => "ConfigurationUpdate",
         ResponseItem::ContextCompaction { .. } => "ContextCompaction",
         ResponseItem::Other => "Other",
     }
@@ -338,6 +339,7 @@ fn call_id(item: &ResponseItem) -> Option<String> {
         | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ConfigurationUpdate { .. }
         | ResponseItem::ContextCompaction { .. }
         | ResponseItem::Other => None,
     }

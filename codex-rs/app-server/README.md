@@ -43,6 +43,11 @@ opens exactly one raw stream connection to `$CODEX_HOME/app-server-control/app-s
 by default, or to `--sock PATH` when provided, and proxies bytes between that socket and stdin/stdout.
 The proxied stream carries the websocket HTTP Upgrade handshake followed by websocket frames.
 
+On Windows, the socket directory is created with a protected current-user-only DACL. Existing
+directories must already have that owner and DACL; startup rejects broader permissions rather
+than attempting to repair previously exposed state. Custom sockets should use a new dedicated
+subdirectory. The listener pins the validated directory until socket cleanup completes.
+
 Tracing/log output:
 
 - `RUST_LOG` controls log filtering/verbosity.
@@ -208,7 +213,7 @@ Example with notification opt-out:
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
 - `thread/archive` — move a thread’s rollout file into the archived directory and attempt to move any spawned descendant thread rollout files; returns `{}` on success and emits `thread/archived` for each archived thread.
 - `thread/delete` — hard-delete an active or archived thread and any spawned descendant threads; returns `{}` on success and emits `thread/deleted` for each deleted thread.
-- `thread/unsubscribe` — unsubscribe this connection from thread turn/item events. If this was the last subscriber, the server keeps the thread loaded and unloads it only after it has had no subscribers and no thread activity for 30 minutes, runs `SessionEnd` hooks, then emits `thread/closed`.
+- `thread/unsubscribe` — unsubscribe this connection from thread turn/item events. If this was the last subscriber, the server keeps the thread loaded and unloads it only after it has had no subscribers and no thread activity for 60 seconds by default (configured by `thread_unload_delay_secs`), runs `SessionEnd` hooks, then emits `thread/closed`.
 - `thread/name/set` — set or update a thread’s user-facing name for either a loaded thread or a persisted rollout; returns `{}` on success and emits `thread/name/updated` to initialized, opted-in clients. Thread names are not required to be unique; name lookups resolve to the most recently updated thread.
 - `thread/unarchive` — move an archived rollout file back into the sessions directory; returns the restored `thread` on success and emits `thread/unarchived`.
 - `thread/compact/start` — trigger conversation history compaction for a thread; returns `{}` immediately while progress streams through standard turn/item notifications. Parent-owned Multi-Agent V2 subagents reject direct compaction requests.
@@ -297,6 +302,7 @@ Example with notification opt-out:
 - `mcpServer/event/stream/stop` (experimental) — stop the caller's event subscription by `subscriptionId`.
 - `mcpServer/tool/call` — call a tool on a thread's configured MCP server by `threadId`, `server`, `tool`, optional `arguments`, and optional `_meta`, returning the MCP tool result. Parent-owned Multi-Agent V2 subagents reject direct tool calls.
 - `windowsSandbox/setupStart` — start Windows sandbox setup for the selected mode (`elevated` or `unelevated`); accepts an optional absolute `cwd` to target setup for a specific workspace, returns `{ started: true }` immediately, and later emits `windowsSandbox/setupCompleted`.
+  The default-off `windows_sandbox_service` feature enables attempting service provisioning for elevated setup. Clients can set it through `experimentalFeature/enablement/set` before starting setup; when disabled, setup uses the existing elevated helper directly.
 - `feedback/upload` — submit a feedback report (classification + optional reason/logs, conversation_id, and optional `extraLogFiles` attachments array); returns the tracking thread id. With logs enabled, includes bounded recent failed Guardian review actions, decisions, and reviewer history from the reported thread and its descendants, linked to the reviewed turn and target item where available. Rollout selection preserves the reported thread and prioritizes children with retained failed reviews before newer children, including each selected thread's available Guardian trunk rollout. `feedback-thread-index.json` lists selected filenames and bounded omission details; it describes selection, not successful delivery. Failed-review captures are process-local, so missing evidence does not establish that no denial occurred.
 - `config/read` — fetch the runtime-effective config after resolving config layering and managed requirements, including opaque `desktop` values stored in `config.toml`. When configured, the `packagedDefaults` layer has the lowest precedence.
 - `externalAgentConfig/detect` — detect migratable external-agent artifacts with `includeHome`, optional `cwds`, and an optional `migrationSource` selector. Omitted, `null`, or unrecognized migration-source values retain the default behavior. The deprecated optional `source` field remains accepted for compatibility but does not select the migration source. Each detected item includes `cwd` (`null` for home), and multi-item migrations may additionally include structured `details` with plugin ids, skill names, memory, session metadata, or other artifact names. The response also includes connector candidates inferred from detected source sessions, with a normalized display `name`, the number of detected sessions that used the connector, and the source metadata field used for detection.
@@ -638,7 +644,17 @@ Gauges register when first used. Depending on process activity, the snapshot can
 - `notSubscribed` when the connection was not subscribed to that thread.
 - `notLoaded` when the thread is not loaded.
 
-If this was the last subscriber, the server does not unload the thread immediately. It unloads the thread after the thread has had no subscribers and no thread activity for 30 minutes, runs `SessionEnd` hooks, then emits `thread/closed` and a `thread/status/changed` transition to `notLoaded`.
+If this was the last subscriber, the server unloads the thread after the thread has had no subscribers and no thread activity for 60 seconds by default, runs `SessionEnd` hooks, then emits `thread/closed` and a `thread/status/changed` transition to `notLoaded`. A new subscriber or thread activity resets the countdown.
+
+Set the top-level `thread_unload_delay_secs` key in `config.toml` to change this timeout:
+
+```toml
+thread_unload_delay_secs = 60
+```
+
+The value must be a nonnegative integer in seconds that fits in a monotonic-clock deadline; excessively large values are rejected. Set it to `0` to unload as soon as the thread is inactive and has no subscribers. The app-server reads this setting at startup and applies it to all threads, so changes require a server restart. Set it to `1800` to retain the previous 30-minute timeout.
+
+The timeout also applies to ephemeral threads. Unloading discards their in-memory state, and they cannot subsequently be resumed by ID.
 
 `SessionEnd` also runs before archive, delete, and graceful app-server shutdown. It runs only for root threads, not `ThreadSpawn` children or internal subagents. Hooks are advisory: their output cannot block teardown. The default timeout is one second, configured timeouts are capped at three seconds, `async: true` runs synchronously with a configuration warning, and the hook input always reports `reason: "other"`. `SessionEnd` matchers are evaluated against that reason.
 
@@ -1172,6 +1188,8 @@ Use `thread/inject_items` to append prebuilt Responses API items to a loaded thr
 ```
 
 ### Example: Start realtime with WebRTC
+
+Realtime sessions do not require a per-thread feature opt-in. The legacy `features.realtime_conversation` setting is accepted but has no effect, including when set to `false`.
 
 Use `thread/realtime/start` with `transport.type: "webrtc"` when a browser or webview owns the `RTCPeerConnection` and app-server should create the server-side realtime session. The transport `sdp` must be the offer SDP produced by `RTCPeerConnection.createOffer()`, not a hand-written or minimal SDP string.
 
@@ -1744,6 +1762,8 @@ All filesystem paths in this section must be absolute.
 
 Event notifications are the server-initiated event stream for thread lifecycles, turn lifecycles, and the items within them. After you start or resume a thread, keep reading stdout for `thread/started`, `thread/archived`, `thread/unarchived`, `thread/closed`, `turn/*`, and `item/*` notifications.
 
+Harness-owned `configuration_update` input items are persisted for model-history replay and emitted through `rawResponseItem/completed` when raw events are enabled. Clients should use the ordinary reasoning-effort settings rather than inject these controls; raw injected items cannot establish trusted configuration updates.
+
 Thread realtime publishes thread-scoped timeline item lifecycle notifications for paginated threads alongside its existing realtime notifications. Completed timeline items are durably interleaved with ordinary turn items by `thread/timeline/list`. Neither surface changes `ThreadItem`, `thread/read`, `thread/resume`, or `thread/fork`; clients ignore notification methods they do not recognize.
 
 Core records transcript segments, session boundaries, and backing-agent artifact promotions through its injected thread store, even without an app-server event listener. Presentation selection uses the same rules for every Core host. App-server translates Core's history events into the notifications below; it does not append those items again. Recording remains limited to paginated threads. A completed notification follows acceptance by the thread store, not an additional flush or power-loss durability barrier.
@@ -1922,6 +1942,11 @@ explanation. Misalignment explanation and steering details are delivered live bu
 persisted rollout errors, so unavailable details after a restart remain a terminal block.
 
 ## Approvals
+
+In User approval mode (`approvalsReviewer: "user"`), async Guardian scoring and
+prewarming are skipped, and ordinary `node_repl.js` execution confirmations are
+accepted automatically. Separate sensitive-action checks and requests for user
+input keep their existing behavior. Approve for me and Full Access are unchanged.
 
 Full Access (`approvalPolicy: "never"` with unrestricted selected environments)
 skips Guardian, including background scoring. Confirmation-only MCP approvals,
@@ -2727,11 +2752,25 @@ Codex-managed credentials are removed; AWS profiles, environment credentials, an
 
 ### 7) Rate limits (ChatGPT)
 
+Clients that implement automatic Luna Reserve fallback may send
+`"params": { "supportsLunaReserve": true }` on `account/rateLimits/read`. For eligible
+ChatGPT CLI users, this opts into experiment exposure only after the backend reports
+ordinary included usage blocked, for both control and treatment. It does not grant
+Reserve access. Omitted params preserve non-exposing reads; API-key, PAT, and FedRAMP
+sessions do not opt in. Clients connecting to older app servers that reject object
+params should retry without params.
+
+Background polls may also send `"excludeResetCreditDetails": true` to avoid the
+separate reset-credit detail lookup. The usage response still supplies the available
+count. Startup and user-requested usage/reset reads should omit this flag so credit
+details remain available; older servers ignore it and keep their existing behavior.
+
 ```json
 { "method": "account/rateLimits/read", "id": 7 }
 {
   "id": 7,
   "result": {
+    "ordinaryUsageAllowed": true,
     "rateLimits": {
       "primary": { "usedPercent": 25, "windowDurationMins": 15, "resetsAt": 1730947200 },
       "secondary": null,
@@ -2761,9 +2800,11 @@ Field notes:
 - `usedPercent` is current usage within the OpenAI quota window.
 - `windowDurationMins` is the quota window length.
 - `resetsAt` is a Unix timestamp (seconds) for the next reset.
+- `normalModelSlug` optionally identifies the normal model associated with an additional quota, forwarded from `/wham/usage`'s `normal_model_slug`. Clients can use that model's catalog name and reasoning choices without changing the quota alias used for requests. Missing metadata is `null`; it does not grant model access.
 - `rateLimitReachedType` identifies the backend-classified limit state when one has been reached.
 - `individualLimit` describes the effective monthly credit limit when available. In an `account/rateLimits/read` response, `null` means no monthly limit is available. In a sparse `account/rateLimits/updated` notification, nullable account metadata may be unavailable and does not clear a previously observed value.
 - `accountId` identifies the account in the usage snapshot when the backend supplies it.
+- `ordinaryUsageAllowed` is the backend decision for ordinary included usage, validated against the authenticated account and user. It is `null` for unavailable or mismatched identity data. A CLI task that automatically entered Luna Reserve can restore its previous model when a validated read allows included usage or reports usable credits, no backend banner or hard stop remains, and the user has not manually changed models. Percentages, reset timestamps, and sparse notifications do not authorize this transition.
 - `rateLimitUpsell` carries the optional backend-owned `rate_limit_upsell` object from the same usage request, preserving its nested snake_case fields. The backend controls eligibility; clients do not evaluate an experiment or issue another request for it. A missing, null, or unsupported banner leaves the existing client UI in place. Banners whose account or user does not match the authenticated identity are omitted. Sparse notifications do not clear this snapshot-only field.
 - `rateLimitResetCredits` contains the available earned-reset count when the backend provides it; otherwise it is `null`.
 - `rateLimitResetCredits.credits` is `null` when only the count is available. An empty array means details were fetched and no available credits were returned.

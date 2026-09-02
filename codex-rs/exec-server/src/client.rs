@@ -1871,6 +1871,7 @@ mod tests {
         let session = client
             .start_process(
                 ExecParams {
+                    metadata: Default::default(),
                     process_id: process_id.clone(),
                     argv: vec!["true".to_string()],
                     cwd: PathUri::from_host_native_path(std::env::current_dir().expect("cwd"))
@@ -2428,6 +2429,10 @@ mod tests {
     }
 
     #[test_case::test_case(Some(EnvironmentInfo::local()); "from_initialize")]
+    #[test_case::test_case(Some(EnvironmentInfo {
+        executor_version: "1.2.3-alpha.4".to_string(),
+        ..EnvironmentInfo::local()
+    }); "with_executor_version")]
     #[test_case::test_case(None; "legacy_server")]
     #[tokio::test]
     async fn environment_info_is_cached(

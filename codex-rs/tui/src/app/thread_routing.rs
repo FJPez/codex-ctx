@@ -1558,6 +1558,7 @@ impl App {
         mut snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
+        replay_filter::omit_completed_agent_deltas(&mut snapshot.events);
         let request_changes = snapshot
             .events
             .iter()

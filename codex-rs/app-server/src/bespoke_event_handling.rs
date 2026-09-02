@@ -932,7 +932,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
             let request_cwd = match request.cwd {
                 Some(cwd) => cwd,
-                None => conversation.config_snapshot().await.cwd().clone(),
+                None => {
+                    LegacyAppPathString::from_abs_path(conversation.config_snapshot().await.cwd())
+                }
             };
             let params = PermissionsRequestApprovalParams {
                 thread_id: conversation_id.to_string(),
@@ -3843,6 +3845,7 @@ mod tests {
         let rate_limits = RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: None,
+            normal_model_slug: None,
             primary: Some(RateLimitWindow {
                 used_percent: 42.5,
                 window_minutes: Some(15),

@@ -16,7 +16,7 @@ mod compaction;
 mod config_requirements_in_app_browser;
 mod config_rpc;
 mod connection_handling_websocket;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod connection_handling_websocket_unix;
 #[cfg(unix)]
 mod curated_mcp_sync;
@@ -44,6 +44,7 @@ mod hooks_list;
 mod host_skills;
 mod imagegen_extension;
 mod initialize;
+mod luna_reserve;
 mod marketplace_add;
 mod marketplace_remove;
 mod marketplace_upgrade;

@@ -12,12 +12,16 @@ mod backend_banner_recovery_tests;
 mod backend_banner_startup_tests;
 #[path = "tests/background_exit_tests.rs"]
 mod background_exit_tests;
+#[path = "tests/buffered_replay.rs"]
+mod buffered_replay;
 #[path = "tests/connector_policy.rs"]
 mod connector_policy;
 #[path = "tests/disconnect_tests.rs"]
 mod disconnect;
 #[path = "tests/key_chords.rs"]
 mod key_chords;
+#[path = "tests/luna_reserve_recovery_tests.rs"]
+mod luna_reserve_recovery_tests;
 #[path = "tests/mcp_startup.rs"]
 mod mcp_startup;
 mod model_catalog;
@@ -3809,7 +3813,7 @@ async fn inactive_thread_permissions_approval_preserves_file_system_permissions(
             item_id: "call-approval".to_string(),
             environment_id: Some("remote".to_string()),
             started_at_ms: 0,
-            cwd: test_absolute_path("/tmp"),
+            cwd: test_absolute_path("/tmp").into(),
             reason: Some("Need access to .git".to_string()),
             permissions: codex_app_server_protocol::RequestPermissionProfile {
                 network: Some(AdditionalNetworkPermissions {

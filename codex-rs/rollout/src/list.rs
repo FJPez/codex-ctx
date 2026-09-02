@@ -20,7 +20,6 @@ use super::SESSIONS_SUBDIR;
 use super::compression;
 use super::rollout_file_name::RolloutFileName;
 use crate::RolloutItem;
-use crate::RolloutLine;
 use crate::protocol::EventMsg;
 use crate::state_db;
 use codex_file_search as file_search;
@@ -1128,7 +1127,7 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
         }
         lines_scanned += 1;
 
-        let parsed: Result<RolloutLine, _> = serde_json::from_str(trimmed);
+        let parsed = crate::parse_rollout_line(trimmed);
         let rollout_line = match parsed {
             Ok(rollout_line) => rollout_line,
             Err(_) => {
@@ -1184,7 +1183,9 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
             RolloutItem::TokenUsageRecord(_) => {
                 // Not included in `head`; skip.
             }
-            RolloutItem::WorldState(_) | RolloutItem::SecurityRiskScore(_) => {
+            RolloutItem::RetainedContext(_)
+            | RolloutItem::WorldState(_)
+            | RolloutItem::SecurityRiskScore(_) => {
                 // Not included in `head`; skip.
             }
             RolloutItem::RealtimeItem(_) => {
@@ -1239,7 +1240,7 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) {
+        if let Ok(rollout_line) = crate::parse_rollout_line(trimmed) {
             match rollout_line.item {
                 RolloutItem::SessionMeta(session_meta_line) => {
                     if let Ok(value) = serde_json::to_value(session_meta_line) {
@@ -1262,6 +1263,7 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
                 | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::WorldState(_)
                 | RolloutItem::RealtimeItem(_)
+                | RolloutItem::RetainedContext(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => {}
             }
@@ -1297,7 +1299,7 @@ pub async fn read_session_meta_line(path: &Path) -> io::Result<SessionMetaLine> 
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
+        let Ok(rollout_line) = crate::parse_rollout_line(trimmed) else {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
                 crate::recorder::reject_unknown_thread_history_mode(&value)?;
             }
@@ -1317,6 +1319,7 @@ pub async fn read_session_meta_line(path: &Path) -> io::Result<SessionMetaLine> 
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => {}
         }
