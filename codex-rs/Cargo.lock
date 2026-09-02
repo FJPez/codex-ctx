@@ -4523,6 +4523,7 @@ dependencies = [
  "codex-cloud-config",
  "codex-config",
  "codex-connectors",
+ "codex-context-profiler",
  "codex-core-plugins",
  "codex-exec-server",
  "codex-features",
