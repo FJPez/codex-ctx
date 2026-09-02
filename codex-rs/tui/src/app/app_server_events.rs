@@ -65,6 +65,7 @@ impl App {
                     skipped,
                     "app-server event consumer lagged; dropping ignored events"
                 );
+                self.profiler.broadcast_lagged(skipped);
                 self.refresh_mcp_startup_expected_servers_from_config();
                 self.chat_widget.finish_mcp_startup_after_lag();
                 self.refresh_agents_overview_threads(app_server_client);

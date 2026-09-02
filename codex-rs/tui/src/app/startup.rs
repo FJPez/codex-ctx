@@ -497,6 +497,15 @@ See the Codex keymap documentation for supported actions and examples."
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
+        let profiler = if config
+            .features
+            .enabled(codex_features::Feature::ContextProfiler)
+        {
+            ProfilerRegistry::enabled(&config)
+        } else {
+            ProfilerRegistry::disabled()
+        };
+
         let mut app = Self {
             model_catalog,
             session_telemetry: session_telemetry.clone(),
@@ -542,6 +551,7 @@ See the Codex keymap documentation for supported actions and examples."
             pending_update_action: None,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
+            profiler,
             thread_event_channels: HashMap::new(),
             temporary_structured_requests: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),

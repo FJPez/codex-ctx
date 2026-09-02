@@ -38,6 +38,7 @@ use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ExternalEditorState;
 use crate::chatwidget::ReplayKind;
 use crate::chatwidget::ThreadInputState;
+use crate::context_profiler::ProfilerRegistry;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::split_command_string;
@@ -605,6 +606,7 @@ pub(crate) struct App {
 
     windows_sandbox: WindowsSandboxState,
 
+    profiler: ProfilerRegistry,
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
