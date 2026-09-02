@@ -81,6 +81,7 @@ async fn terminal_title_shows_action_required_while_exec_approval_is_pending() {
     );
 
     let request = ExecApprovalRequestEvent {
+        kind: Default::default(),
         call_id: "call-action-required".into(),
         approval_id: Some("call-action-required".into()),
         turn_id: "turn-action-required".into(),
@@ -126,13 +127,13 @@ async fn terminal_title_shows_action_required_while_exec_approval_is_pending() {
     assert!(chat.should_animate_terminal_title_spinner());
 
     for (animations, title_items) in [(false, None), (true, Some(Vec::new()))] {
-        chat.config.animations = true;
-        chat.config.tui_terminal_title = None;
+        chat.local_settings.tui.animations = true;
+        chat.local_settings.tui.terminal_title = None;
         chat.refresh_terminal_title();
         assert!(chat.terminal_title_next_refresh.is_some());
 
-        chat.config.animations = animations;
-        chat.config.tui_terminal_title = title_items;
+        chat.local_settings.tui.animations = animations;
+        chat.local_settings.tui.terminal_title = title_items;
         chat.refresh_terminal_title();
         assert!(chat.terminal_title_next_refresh.is_none());
     }
@@ -141,11 +142,12 @@ async fn terminal_title_shows_action_required_while_exec_approval_is_pending() {
 #[tokio::test]
 async fn terminal_title_action_required_respects_spinner_setting() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_terminal_title = Some(vec!["project".to_string()]);
+    chat.local_settings.tui.terminal_title = Some(vec!["project".to_string()]);
     chat.bottom_pane.set_task_running(/*running*/ true);
     chat.refresh_terminal_title();
 
     let request = ExecApprovalRequestEvent {
+        kind: Default::default(),
         call_id: "call-no-spinner".into(),
         approval_id: Some("call-no-spinner".into()),
         turn_id: "turn-no-spinner".into(),
@@ -174,6 +176,7 @@ async fn terminal_title_action_required_blinks_when_animations_are_enabled() {
     chat.refresh_terminal_title();
 
     let request = ExecApprovalRequestEvent {
+        kind: Default::default(),
         call_id: "call-blink".into(),
         approval_id: Some("call-blink".into()),
         turn_id: "turn-blink".into(),
@@ -203,7 +206,7 @@ async fn terminal_title_action_required_blinks_when_animations_are_enabled() {
 #[tokio::test]
 async fn terminal_title_activity_indicators_do_not_animate_when_animations_are_disabled() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.animations = false;
+    chat.local_settings.tui.animations = false;
     chat.bottom_pane.set_task_running(/*running*/ true);
     chat.terminal_title_animation_origin = Instant::now() - std::time::Duration::from_millis(1500);
     chat.refresh_terminal_title();
@@ -212,6 +215,7 @@ async fn terminal_title_activity_indicators_do_not_animate_when_animations_are_d
     assert!(!chat.should_animate_terminal_title_spinner());
 
     let request = ExecApprovalRequestEvent {
+        kind: Default::default(),
         call_id: "call-no-animations".into(),
         approval_id: Some("call-no-animations".into()),
         turn_id: "turn-no-animations".into(),

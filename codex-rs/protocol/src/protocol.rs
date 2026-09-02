@@ -34,6 +34,7 @@ use crate::dynamic_tools::DynamicToolResponse;
 use crate::dynamic_tools::DynamicToolSpec;
 use crate::error::Result as CodexResult;
 use crate::items::AgentMessageDelivery;
+use crate::items::AsyncUserInputQuestion;
 use crate::items::TurnItem;
 use crate::mcp::CallToolResult;
 use crate::mcp::RequestId;
@@ -97,6 +98,7 @@ pub use crate::approvals::NetworkPolicyAmendment;
 pub use crate::approvals::NetworkPolicyRuleAction;
 pub use crate::environment::EnvironmentConfig;
 pub use crate::environment::EnvironmentConfigState;
+pub use crate::environment::has_full_access;
 pub use crate::legacy_events::HasLegacyEvent;
 pub use crate::permissions::FileSystemAccessMode;
 pub use crate::permissions::FileSystemPath;
@@ -254,8 +256,16 @@ pub struct ConversationStartParams {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConversationStartTransport {
     Websocket,
-    Webrtc { sdp: String },
-    ExistingCall { call_id: String },
+    Webrtc {
+        sdp: String,
+    },
+    ExistingCall {
+        call_id: String,
+        /// Endpoint selected by the embedding runtime for this call's sideband.
+        /// This is an in-process override, not a client-supplied API parameter.
+        /// `None` uses the configured endpoint or the default public API.
+        sideband_base_url: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -440,6 +450,13 @@ pub enum RealtimeEvent {
     ConversationItemDone {
         item_id: String,
     },
+    /// Canonical display history produced by Core, separate from provider events.
+    HistoryItemStarted(crate::realtime::RealtimeItem),
+    HistoryTranscriptDelta {
+        item_id: String,
+        delta: String,
+    },
+    HistoryItemCompleted(crate::realtime::RealtimeItem),
     HandoffRequested(RealtimeHandoffRequested),
     NoopRequested(RealtimeNoopRequested),
     Error(String),
@@ -475,6 +492,8 @@ pub struct ConversationSpeechParams {
 /// task kind. Child sessions and consumers of frozen initial settings are unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnSettingsUpdate {
+    /// Changes the reviewer for subsequent approval requests, not pending reviews.
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
     pub model: Option<String>,
     /// `None` preserves the selection; `Some(None)` clears it.
     pub effort: Option<Option<ReasoningEffortConfig>>,
@@ -739,6 +758,8 @@ pub enum Op {
     RunUserShellCommand {
         /// The raw command string after '!'
         command: String,
+        /// Maximum execution time in milliseconds. Defaults to one hour.
+        timeout_ms: Option<u64>,
     },
 }
 
@@ -1340,6 +1361,12 @@ pub enum EventMsg {
     /// indicates the turn continued but the user should still be notified.
     Warning(WarningEvent),
 
+    /// Provider-owned authentication recovery has started for the current turn.
+    AuthRecoveryStarted(AuthRecoveryEvent),
+
+    /// Provider-owned authentication recovery has completed for the current turn.
+    AuthRecoveryCompleted(AuthRecoveryEvent),
+
     /// Warning issued by the guardian automatic approval reviewer.
     GuardianWarning(WarningEvent),
 
@@ -1640,6 +1667,11 @@ pub struct HookOutputEntry {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub struct HookRunSummary {
+    /// Internal classification used to suppress lifecycle notifications without losing telemetry.
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub builtin: bool,
     pub id: String,
     pub event_name: HookEventName,
     pub handler_type: HookHandlerType,
@@ -1820,6 +1852,7 @@ pub enum CodexErrorInfo {
     ContextWindowExceeded,
     SessionBudgetExceeded,
     UsageLimitExceeded,
+    RateLimitExceeded,
     ServerOverloaded,
     CyberPolicy,
     MisalignmentPolicyViolation,
@@ -1859,6 +1892,7 @@ impl CodexErrorInfo {
             Self::ContextWindowExceeded
             | Self::SessionBudgetExceeded
             | Self::UsageLimitExceeded
+            | Self::RateLimitExceeded
             | Self::ServerOverloaded
             | Self::CyberPolicy
             | Self::MisalignmentPolicyViolation
@@ -1880,13 +1914,14 @@ pub struct RawResponseItemEvent {
     pub item: ResponseItem,
 }
 
-/// Exact usage reported by one upstream Responses API completion.
+/// Exact usage and metadata reported by one upstream Responses API completion.
 ///
 /// Unlike TokenCountEvent, this is not accumulated, estimated, or replayed.
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 pub struct RawResponseCompletedEvent {
     pub response_id: String,
     pub token_usage: Option<TokenUsage>,
+    pub usage_metadata: Option<crate::ResponseUsageMetadata>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
@@ -1981,11 +2016,59 @@ pub struct ExitedReviewModeEvent {
 
 // Individual event payload types matching each `EventMsg` variant.
 
+/// Public, customer-facing details supplied by the Responses API for a misalignment block.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct MisalignmentErrorDetails {
+    /// Open-ended classification; new values must not prevent the error from being surfaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+    /// A localized explanation is required before a client may offer continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detailed_explanation: Option<String>,
+    /// Model-visible instruction to submit if the user elects to continue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer: Option<MisalignmentSteer>,
+}
+
+impl fmt::Debug for MisalignmentErrorDetails {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MisalignmentErrorDetails")
+            .field("error_type", &self.error_type)
+            .field(
+                "has_detailed_explanation",
+                &self.detailed_explanation.is_some(),
+            )
+            .field("has_steer", &self.steer.is_some())
+            .finish()
+    }
+}
+
+/// Public steering instruction returned alongside a resumable misalignment block.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct MisalignmentSteer {
+    pub message: String,
+}
+
+impl fmt::Debug for MisalignmentSteer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MisalignmentSteer")
+            .field("message", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct ErrorEvent {
     pub message: String,
     #[serde(default)]
     pub codex_error_info: Option<CodexErrorInfo>,
+    /// Sensitive explanation and steering are delivered live but never enter rollout storage.
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub misalignment: Option<MisalignmentErrorDetails>,
 }
 
 impl ErrorEvent {
@@ -1999,6 +2082,15 @@ impl ErrorEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct WarningEvent {
+    pub message: String,
+}
+
+/// User-facing progress for provider-owned authentication recovery.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct AuthRecoveryEvent {
+    /// Display name of the model provider whose authentication is recovering.
+    pub provider: String,
+    /// User-facing description of the authentication recovery stage.
     pub message: String,
 }
 
@@ -2090,6 +2182,11 @@ pub struct TurnStartedEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ThreadSettingsAppliedEvent {
+    /// Logical task that owns this snapshot, independent of the physical rollout file.
+    /// Absent in older histories; copied snapshots retain their original owner's ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thread_id: Option<ThreadId>,
     pub thread_settings: ThreadSettingsSnapshot,
 }
 
@@ -2135,6 +2232,19 @@ pub struct TokenUsage {
     #[schemars(skip)]
     #[ts(skip)]
     pub codex_rollout_budget_units: Option<serde_json::Number>,
+}
+
+/// Best-effort Responses API usage observed for one completed response.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct TokenUsageRecord {
+    pub thread_id: ThreadId,
+    pub turn_id: String,
+    pub session_id: SessionId,
+    pub root_turn_id: String,
+    pub response_id: String,
+    pub usage: TokenUsage,
+    pub turn_token_usage: TokenUsage,
+    pub thread_token_usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -2387,6 +2497,9 @@ pub struct AgentMessageEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub delivery: Option<AgentMessageDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub questions: Option<Vec<AsyncUserInputQuestion>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -2922,10 +3035,15 @@ pub struct HistoryPosition {
 /// and should be used when there is no config override.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct SessionMeta {
+    /// session_id is equal to the root thread's ID.
     pub session_id: SessionId,
     pub id: ThreadId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
+    /// Exclusive ordinal inherited from the logical fork parent, independent of `history_base`.
+    /// Revert may replace the physical history base while retaining this fork boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_ordinal_exclusive: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_thread_id: Option<ThreadId>,
     pub timestamp: String,
@@ -2987,6 +3105,7 @@ impl Default for SessionMeta {
             session_id: id.into(),
             id,
             forked_from_id: None,
+            forked_from_ordinal_exclusive: None,
             parent_thread_id: None,
             timestamp: String::new(),
             cwd: PathBuf::new(),
@@ -3080,6 +3199,10 @@ pub struct TurnContextNetworkItem {
 pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// Root turn that owns this subagent turn's attribution.
+    /// Only set for subagent turns; persisted so resume keeps the scope frozen at turn start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_turn_id: Option<String>,
     pub cwd: AbsolutePathBuf,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
@@ -4326,6 +4449,43 @@ mod tests {
     }
 
     #[test]
+    fn hook_builtin_classification_stays_internal() -> Result<()> {
+        let wire = json!({
+            "id": "cleanup-hook",
+            "event_name": "stop",
+            "handler_type": "mcp_tool",
+            "execution_mode": "sync",
+            "scope": "turn",
+            "source_path": test_path_buf("/tmp/hooks.json").abs(),
+            "source": "plugin",
+            "display_order": 0,
+            "status": "completed",
+            "status_message": null,
+            "started_at": 10,
+            "completed_at": 11,
+            "duration_ms": 1000,
+            "entries": [],
+        });
+        let mut run: HookRunSummary = serde_json::from_value(wire.clone())?;
+        assert!(!run.builtin);
+        run.builtin = true;
+        assert_eq!(serde_json::to_value(run)?, wire);
+
+        let mut untrusted_wire = wire;
+        untrusted_wire["builtin"] = json!(true);
+        assert!(!serde_json::from_value::<HookRunSummary>(untrusted_wire)?.builtin);
+        let schema = serde_json::to_value(schemars::schema_for!(HookRunSummary))?;
+        assert!(
+            !schema["properties"]
+                .as_object()
+                .expect("hook properties")
+                .contains_key("builtin")
+        );
+        assert!(!HookRunSummary::decl().contains("builtin:"));
+        Ok(())
+    }
+
+    #[test]
     fn feature_thread_source_serializes_as_its_app_owned_label() -> Result<()> {
         let source = ThreadSource::Feature("automation".to_string());
 
@@ -5563,6 +5723,7 @@ mod tests {
     #[test]
     fn rollback_failed_error_does_not_affect_turn_status() {
         let event = ErrorEvent {
+            misalignment: None,
             message: "rollback failed".into(),
             codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
         };
@@ -5572,6 +5733,7 @@ mod tests {
     #[test]
     fn active_turn_not_steerable_error_does_not_affect_turn_status() {
         let event = ErrorEvent {
+            misalignment: None,
             message: "cannot steer a review turn".into(),
             codex_error_info: Some(CodexErrorInfo::ActiveTurnNotSteerable {
                 turn_kind: NonSteerableTurnKind::Review,
@@ -5583,10 +5745,42 @@ mod tests {
     #[test]
     fn generic_error_affects_turn_status() {
         let event = ErrorEvent {
+            misalignment: None,
             message: "generic".into(),
             codex_error_info: Some(CodexErrorInfo::Other),
         };
         assert!(event.affects_turn_status());
+    }
+
+    #[test]
+    fn misalignment_explanation_and_steer_are_never_serialized_into_error_events() {
+        let event = ErrorEvent {
+            message: "This request violated the misalignment policy.".to_string(),
+            codex_error_info: Some(CodexErrorInfo::MisalignmentPolicyViolation),
+            misalignment: Some(MisalignmentErrorDetails {
+                error_type: Some("unauthorized_data_transfer".to_string()),
+                detailed_explanation: Some("Sensitive customer explanation".to_string()),
+                steer: Some(MisalignmentSteer {
+                    message: "Sensitive customer steering".to_string(),
+                }),
+            }),
+        };
+
+        let serialized = serde_json::to_value(&event).expect("serialize error event");
+        assert_eq!(
+            serialized,
+            json!({
+                "message": "This request violated the misalignment policy.",
+                "codex_error_info": "misalignment_policy_violation"
+            })
+        );
+        let restored: ErrorEvent =
+            serde_json::from_value(serialized).expect("deserialize persisted error event");
+        assert_eq!(restored.misalignment, None);
+
+        let debug = format!("{event:?}");
+        assert!(!debug.contains("Sensitive customer explanation"));
+        assert!(!debug.contains("Sensitive customer steering"));
     }
 
     #[test]
@@ -5801,7 +5995,9 @@ mod tests {
 
         assert_eq!(session_meta.history_mode, ThreadHistoryMode::Legacy);
         assert_eq!(session_meta.history_base, None);
+        assert_eq!(session_meta.forked_from_ordinal_exclusive, None);
         let serialized = serde_json::to_value(&session_meta)?;
+        assert!(serialized.get("forked_from_ordinal_exclusive").is_none());
         assert_eq!(serialized["history_mode"], json!("legacy"));
         let mut unknown = serialized;
         unknown["history_mode"] = json!("future");
@@ -5843,6 +6039,7 @@ mod tests {
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
+            root_turn_id: None,
             cwd: test_path_buf("/tmp").abs(),
             workspace_roots: None,
             current_date: None,

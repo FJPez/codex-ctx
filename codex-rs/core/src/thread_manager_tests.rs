@@ -1062,6 +1062,7 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
     reviewer_environment.config =
         EnvironmentConfigState::Ready(codex_protocol::protocol::EnvironmentConfig {
             allow_login_shell: true,
+            workspace_roots: reviewer_environment.workspace_roots.clone(),
             permission_profile: config.permissions.permission_profile_state().snapshot(),
             shell_environment_policy: Default::default(),
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
@@ -2441,6 +2442,7 @@ fn completed_legacy_event_history_is_not_mid_turn() {
             phase: None,
             memory_citation: None,
             delivery: None,
+            questions: None,
         })),
     ]);
 

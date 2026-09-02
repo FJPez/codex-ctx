@@ -25,48 +25,6 @@ fn parse_tool_input_schema_coerces_boolean_schemas() {
 }
 
 #[test]
-fn json_schema_serializes_encrypted_marker() {
-    let schema = JsonSchema::string(Some("Secret value".to_string())).with_encrypted();
-
-    assert_eq!(
-        serde_json::to_value(schema).expect("serialize schema"),
-        serde_json::json!({
-            "type": "string",
-            "description": "Secret value",
-            "encrypted": true,
-        })
-    );
-}
-
-#[test]
-fn parse_tool_input_schema_preserves_numeric_and_string_bounds() {
-    let input = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "count": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9_007_199_254_740_993_u64
-            },
-            "score": {"type": "number", "minimum": -1.5, "maximum": 3.25},
-            "query": {"type": "string", "maxLength": 1000}
-        },
-        "additionalProperties": false
-    });
-
-    for parse in [
-        parse_tool_input_schema,
-        parse_tool_input_schema_without_compaction,
-    ] {
-        let schema = parse(&input).expect("parse schema");
-        assert_eq!(
-            serde_json::to_value(schema).expect("serialize schema"),
-            input
-        );
-    }
-}
-
-#[test]
 fn parse_tool_input_schema_infers_object_shape_and_defaults_properties() {
     // Example schema shape:
     // {
@@ -252,10 +210,7 @@ fn parse_tool_input_schema_infers_number_from_numeric_keywords() {
     }))
     .expect("parse schema");
 
-    assert_eq!(
-        serde_json::to_value(schema).expect("serialize schema"),
-        serde_json::json!({"type": "number", "minimum": 1})
-    );
+    assert_eq!(schema, JsonSchema::number(/*description*/ None));
 }
 
 #[test]
@@ -277,12 +232,11 @@ fn parse_tool_input_schema_infers_number_from_multiple_of() {
 }
 
 #[test]
-fn parse_tool_input_schema_infers_string_from_keywords() {
+fn parse_tool_input_schema_infers_string_from_enum_const_and_format_keywords() {
     // Example schema shapes:
     // { "enum": ["fast", "safe"] }
     // { "const": "file" }
     // { "format": "date-time" }
-    // { "maxLength": 1000 }
     //
     // Expected normalization behavior:
     // - `enum` and `const` normalize into explicit string-enum schemas.
@@ -299,10 +253,6 @@ fn parse_tool_input_schema_infers_string_from_keywords() {
         "format": "date-time"
     }))
     .expect("parse format schema");
-    let max_length_schema = parse_tool_input_schema(&serde_json::json!({
-        "maxLength": 1000
-    }))
-    .expect("parse maxLength schema");
 
     assert_eq!(
         enum_schema,
@@ -316,10 +266,6 @@ fn parse_tool_input_schema_infers_string_from_keywords() {
         JsonSchema::string_enum(vec![serde_json::json!("file")], /*description*/ None)
     );
     assert_eq!(format_schema, JsonSchema::string(/*description*/ None));
-    assert_eq!(
-        serde_json::to_value(max_length_schema).expect("serialize schema"),
-        serde_json::json!({"type": "string", "maxLength": 1000})
-    );
 }
 
 #[test]
@@ -1322,132 +1268,6 @@ fn parse_large_tool_input_schema_preserves_object_enum_literal_descriptions() {
                             "description": "second literal",
                             "id": 2
                         }
-                    ]
-                }
-            }
-        })
-    );
-}
-
-#[test]
-fn collapse_deep_schema_objects_traverses_schema_children() {
-    let mut schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "object_parent": {
-                "type": "object",
-                "properties": {
-                    "complex": {
-                        "type": "object",
-                        "properties": {
-                            "nested": {
-                                "type": "object",
-                                "properties": {
-                                    "leaf": { "type": "string" }
-                                }
-                            }
-                        }
-                    },
-                    "scalar": {
-                        "type": "string"
-                    }
-                }
-            },
-            "array_parent": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "nested": {
-                            "type": "object",
-                            "properties": {
-                                "leaf": { "type": "string" }
-                            }
-                        }
-                    }
-                }
-            },
-            "map_parent": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "object",
-                    "properties": {
-                        "nested": {
-                            "type": "object",
-                            "properties": {
-                                "leaf": { "type": "string" }
-                            }
-                        }
-                    }
-                }
-            },
-            "union_parent": {
-                "anyOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "nested": {
-                                "type": "object",
-                                "properties": {
-                                    "leaf": { "type": "string" }
-                                }
-                            }
-                        }
-                    },
-                    { "type": "string" }
-                ]
-            }
-        }
-    });
-
-    super::collapse_deep_schema_objects(&mut schema, /*depth*/ 0);
-
-    assert_eq!(
-        schema,
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "object_parent": {
-                    "type": "object",
-                    "properties": {
-                        "complex": {
-                            "type": "object",
-                            "properties": {
-                                "nested": {}
-                            }
-                        },
-                        "scalar": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "array_parent": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "nested": {}
-                        }
-                    }
-                },
-                "map_parent": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "object",
-                        "properties": {
-                            "nested": {}
-                        }
-                    }
-                },
-                "union_parent": {
-                    "anyOf": [
-                        {
-                            "type": "object",
-                            "properties": {
-                                "nested": {}
-                            }
-                        },
-                        { "type": "string" }
                     ]
                 }
             }

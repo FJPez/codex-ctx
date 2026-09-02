@@ -67,6 +67,7 @@ fn agent_message_item(message: &str) -> RolloutItem {
         phase: None,
         memory_citation: None,
         delivery: None,
+        questions: None,
     }))
 }
 
@@ -188,6 +189,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             session_id: thread_id.into(),
             id: thread_id,
             forked_from_id: None,
+            forked_from_ordinal_exclusive: None,
             parent_thread_id: None,
             timestamp: "2026-01-27T12:34:56Z".to_string(),
             cwd: home.path().to_path_buf(),
@@ -445,6 +447,8 @@ async fn load_rollout_items_preserves_security_risk_scores() -> std::io::Result<
             ("action_risk".to_string(), 0.76),
             ("data_exfiltration".to_string(), 0.31),
         ]),
+        call_id: Some("call-1".to_owned()),
+        action: Some(serde_json::json!({"path": "README.md", "tool": "read_file"})),
         sampled_at: None,
     };
     let security_risk_item = RolloutItem::SecurityRiskScore(security_risk.clone());
@@ -647,6 +651,7 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
         ))])
         .await?;
@@ -726,7 +731,7 @@ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> 
         &config,
         RolloutRecorderParams::new(
             ThreadId::new(),
-            /*forked_from_id*/ None,
+            Some(history_base.thread_id),
             /*parent_thread_id*/ None,
             SessionSource::Exec,
             /*thread_source*/ None,
@@ -735,12 +740,19 @@ async fn referenced_paginated_rollout_starts_at_history_cutoff_and_resumes() -> 
             Vec::new(),
         )
         .with_history_mode(ThreadHistoryMode::Paginated)
-        .with_history_base(Some(history_base)),
+        .with_history_base(Some(history_base))
+        .with_forked_from_ordinal_exclusive(Some(history_base.end_ordinal_exclusive)),
     )
     .await?;
     let rollout_path = recorder.rollout_path().to_path_buf();
     recorder.persist().await?;
     recorder.shutdown().await?;
+
+    let meta = crate::read_session_meta_line(&rollout_path).await?.meta;
+    assert_eq!(
+        meta.forked_from_ordinal_exclusive,
+        Some(history_base.end_ordinal_exclusive)
+    );
 
     let resumed =
         RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone())).await?;
@@ -895,6 +907,7 @@ async fn persist_reports_filesystem_error_and_retries_buffered_items() -> std::i
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
         ))])
         .await?;
@@ -947,6 +960,7 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
             phase: None,
             memory_citation: None,
             delivery: None,
+            questions: None,
         },
     ))]);
 
@@ -1534,6 +1548,8 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
         agent_nickname: None,
         agent_role: None,
         model_provider: None,
+        model: None,
+        reasoning_effort: None,
         cli_version: None,
         created_at: None,
         recency_at: Some("2025-01-03T15:59:00.000Z".to_string()),
@@ -1563,6 +1579,8 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
         agent_nickname: Some("state-agent".to_string()),
         agent_role: Some("state-role".to_string()),
         model_provider: Some("state-provider".to_string()),
+        model: None,
+        reasoning_effort: None,
         cli_version: Some("state-version".to_string()),
         created_at: Some("2025-01-03T16:00:00Z".to_string()),
         recency_at: Some("2025-01-03T16:00:30.001Z".to_string()),
@@ -1708,6 +1726,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
         ordinal: None,
         item: RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some("turn-1".to_string()),
+            root_turn_id: None,
             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
                 .expect("absolute latest cwd"),
             workspace_roots: None,

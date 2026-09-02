@@ -3,6 +3,8 @@
 //! This module contains the exhaustive `AppEvent` dispatcher and exit-mode handling. Large domain
 //! actions are delegated to focused app submodules so the central match remains the routing layer.
 
+use super::rate_limit_refresh::RateLimitReadStatus;
+use super::rate_limit_refresh::RateLimitRefreshOutcome;
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
@@ -29,6 +31,19 @@ impl App {
         app_server: &mut AppServerSession,
         event: AppEvent,
     ) -> Result<AppRunControl> {
+        if self.reconnect.offline
+            && !matches!(
+                &event,
+                AppEvent::InsertHistoryCell(_)
+                    | AppEvent::AppendMessageHistoryEntry { .. }
+                    | AppEvent::BeginInitialHistoryReplayBuffer
+                    | AppEvent::BeginThreadSwitchHistoryReplayBuffer
+                    | AppEvent::EndInitialHistoryReplayBuffer
+                    | AppEvent::FatalExitRequest(_)
+            )
+        {
+            return Ok(AppRunControl::Continue);
+        }
         if self.chat_widget.has_misalignment_policy_violation()
             && matches!(
                 event,
@@ -237,6 +252,7 @@ impl App {
                 match crate::resume_picker::run_resume_picker_from_existing_session_with_app_server(
                     tui,
                     &self.config,
+                    &self.local_settings,
                     /*show_all*/ false,
                     /*include_non_interactive*/ false,
                     picker_app_server,
@@ -347,7 +363,7 @@ impl App {
                     fork_config.model = Some(self.chat_widget.current_model().to_string());
                     fork_config.model_reasoning_effort =
                         self.chat_widget.current_reasoning_effort();
-                    match app_server.fork_thread(fork_config, thread_id).await {
+                    match app_server.fork_thread(&self.local_settings, fork_config, thread_id).await {
                         Ok(mut forked) => {
                             let name_error = if let Some(name) = name {
                                 match app_server
@@ -500,8 +516,7 @@ impl App {
                             let before_turn_id = before_turn_id
                                 .or_else(|| turns.first().map(|turn| turn.id.clone()));
                             app_server
-                                .fork_thread_at(
-                                    config.clone(),
+                                .fork_thread_at(&self.local_settings, config.clone(),
                                     thread_id,
                                     /*last_turn_id*/ None,
                                     before_turn_id,
@@ -723,6 +738,10 @@ impl App {
                 }
                 self.chat_widget.prepare_local_op_submission(&op);
                 if let Err(err) = self.submit_active_thread_op(app_server, op).await {
+                    if self.recover_transport_error(&err)
+                    {
+                        return Ok(AppRunControl::Continue);
+                    }
                     let unsupported_permissions = err
                         .downcast_ref::<UnsupportedLegacyPermissionProfile>()
                         .is_some();
@@ -1237,31 +1256,58 @@ impl App {
                 self.clear_thread_goal(app_server, thread_id).await;
             }
             AppEvent::SendAddCreditsNudgeEmail { credit_type } => {
-                if self
+                if let Some(request_id) = self
                     .chat_widget
                     .start_add_credits_nudge_email_request(credit_type)
                 {
-                    self.send_add_credits_nudge_email(app_server, credit_type);
+                    self.send_add_credits_nudge_email(app_server, request_id, credit_type);
                 }
             }
-            AppEvent::AddCreditsNudgeEmailFinished { result } => {
+            AppEvent::AddCreditsNudgeEmailFinished { request_id, result } => {
                 self.chat_widget
-                    .finish_add_credits_nudge_email_request(result);
+                    .finish_add_credits_nudge_email_request(request_id, result);
             }
             AppEvent::RateLimitsLoaded {
+                request_id,
                 origin,
                 hard_stop_generation,
                 result,
-            } => match result {
+            } => {
+                let accepted = match self.rate_limit_refresh_state.finish(
+                    request_id,
+                    hard_stop_generation,
+                    self.rate_limit_hard_stop_generation,
+                    if result.is_ok() {
+                        RateLimitReadStatus::Succeeded
+                    } else {
+                        RateLimitReadStatus::Failed
+                    },
+                ) {
+                    RateLimitRefreshOutcome::Apply => true,
+                    RateLimitRefreshOutcome::Ignore => false,
+                    RateLimitRefreshOutcome::RefreshRecovery => {
+                        // Start in this account's event turn; a queued refresh could cross an account change.
+                        self.refresh_rate_limits(app_server, RateLimitRefreshOrigin::Recovery);
+                        false
+                    }
+                };
+                match result {
                 Ok(response) => {
                     let rate_limit_reset_credits = response.rate_limit_reset_credits.clone();
-                    let snapshots = if hard_stop_generation == self.rate_limit_hard_stop_generation
+                    let snapshots = if accepted
                     {
+                        self.chat_widget.update_backend_banner(&response);
+                        self.apply_backend_banner_fallback(app_server).await;
                         app_server_rate_limit_snapshots(response)
                     } else {
                         Vec::new()
                     };
                     match origin {
+                        RateLimitRefreshOrigin::Recovery => {
+                            for snapshot in snapshots {
+                                self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
+                            }
+                        }
                         RateLimitRefreshOrigin::StartupPrefetch {
                             reset_hint_request_id,
                         } => {
@@ -1315,8 +1361,10 @@ impl App {
                     }
                 }
                 Err(err) => {
+                    // A failed read is not authoritative recovery. Keep the last valid banner.
                     tracing::warn!("account/rateLimits/read failed during TUI refresh: {err}");
                     match origin {
+                        RateLimitRefreshOrigin::Recovery => {},
                         RateLimitRefreshOrigin::StartupPrefetch {
                             reset_hint_request_id,
                         } => {
@@ -1352,6 +1400,14 @@ impl App {
                             );
                         }
                     }
+                }
+                }
+                if matches!(
+                    origin,
+                    RateLimitRefreshOrigin::Recovery | RateLimitRefreshOrigin::ResetConsume { .. }
+                ) && !self.rate_limit_refresh_state.has_pending_recovery()
+                {
+                    self.chat_widget.finish_rate_limit_recovery();
                 }
             },
             AppEvent::OpenTokenActivity => {
@@ -1415,6 +1471,11 @@ impl App {
                     credit_id,
                     result,
                 ) {
+                    // Reads started before redemption must not restore the pre-reset banner.
+                    self.rate_limit_hard_stop_generation =
+                        self.rate_limit_hard_stop_generation.wrapping_add(1);
+                    self.rate_limit_refresh_state.invalidate_recovery();
+                    self.chat_widget.clear_backend_banner();
                     self.refresh_rate_limits(
                         app_server,
                         RateLimitRefreshOrigin::ResetConsume { request_id },
@@ -1510,7 +1571,7 @@ impl App {
                         config.permissions.active_permission_profile().as_ref(),
                         self.runtime_permission_profile_override
                             .as_ref()
-                            .map(|profile| &profile.permission_profile),
+                            .and_then(RuntimePermissionProfileOverride::turn_permission_profile),
                     );
                     if turn_permissions_overrides(permissions_override, config.cwd.as_path())
                         .is_ok()
@@ -1519,6 +1580,18 @@ impl App {
                             .set_queue_autosend_suppressed(/*suppressed*/ false);
                         self.chat_widget.maybe_send_next_queued_input();
                     }
+                }
+            }
+            AppEvent::FetchModels { request_id } => {
+                if self.chat_widget.model_popup_request_is_current(request_id) {
+                    app_server.fetch_models(request_id, self.app_event_tx.clone());
+                }
+            }
+            AppEvent::ModelsLoaded { request_id, result } => {
+                if self.chat_widget.on_models_loaded(request_id, result) {
+                    self.model_catalog = self.chat_widget.model_catalog();
+                    app_server.set_available_models(self.model_catalog.try_list_models()?);
+                    self.sync_active_thread_service_tier_to_cached_session().await;
                 }
             }
             AppEvent::OpenReasoningPopup { model } => {
@@ -1574,8 +1647,8 @@ impl App {
                 self.chat_widget
                     .open_plan_reasoning_scope_prompt(model, effort);
             }
-            AppEvent::OpenAllModelsPopup { models } => {
-                self.chat_widget.open_all_models_popup(models);
+            AppEvent::OpenAllModelsPopup => {
+                self.chat_widget.open_all_models_popup();
             }
             AppEvent::OpenFullAccessConfirmation {
                 preset,
@@ -2223,7 +2296,8 @@ impl App {
                 self.config = config;
                 let approval_policy =
                     AskForApproval::from(self.config.permissions.approval_policy.value());
-                self.runtime_approval_policy_override = Some(approval_policy);
+                self.runtime_approval_policy_override =
+                    Some(RuntimeApprovalPolicyOverride::Explicit(approval_policy));
                 self.chat_widget.set_approval_policy(approval_policy);
                 self.sync_active_thread_permission_settings_to_cached_session()
                     .await;
@@ -2295,6 +2369,7 @@ impl App {
                             env_map,
                             logs_base_dir,
                             permission_profile,
+                            self.session_telemetry.clone(),
                             tx,
                             /*startup_scan*/ false,
                         );
@@ -2361,7 +2436,8 @@ impl App {
                     .await;
             }
             AppEvent::PersistWorldWritableWarningAcknowledged => {
-                if let Err(err) = ConfigEditsBuilder::for_config(&self.config)
+                self.local_settings.notices.hide_world_writable_warning = Some(true);
+                if let Err(err) = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .set_hide_world_writable_warning(/*acknowledged*/ true)
                     .apply()
                     .await
@@ -2376,7 +2452,8 @@ impl App {
                 }
             }
             AppEvent::PersistRateLimitSwitchPromptHidden => {
-                if let Err(err) = ConfigEditsBuilder::for_config(&self.config)
+                self.local_settings.notices.hide_rate_limit_model_nudge = Some(true);
+                if let Err(err) = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .set_hide_rate_limit_model_nudge(/*acknowledged*/ true)
                     .apply()
                     .await
@@ -2419,7 +2496,7 @@ impl App {
                 from_model,
                 to_model,
             } => {
-                if let Err(err) = ConfigEditsBuilder::for_config(&self.config)
+                if let Err(err) = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .record_model_migration_seen(from_model.as_str(), to_model.as_str())
                     .apply()
                     .await
@@ -2764,14 +2841,14 @@ impl App {
                 let items_edit = crate::legacy_core::config::edit::status_line_items_edit(&ids);
                 let colors_edit =
                     crate::legacy_core::config::edit::status_line_use_colors_edit(use_theme_colors);
-                let apply_result = ConfigEditsBuilder::for_config(&self.config)
+                let apply_result = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .with_edits([items_edit, colors_edit])
                     .apply()
                     .await;
                 match apply_result {
                     Ok(()) => {
-                        self.config.tui_status_line = Some(ids.clone());
-                        self.config.tui_status_line_use_colors = use_theme_colors;
+                        self.local_settings.tui.status_line = Some(ids.clone());
+                        self.local_settings.tui.status_line_use_colors = use_theme_colors;
                         self.chat_widget.setup_status_line(items, use_theme_colors);
                     }
                     Err(err) => {
@@ -2805,13 +2882,13 @@ impl App {
             AppEvent::TerminalTitleSetup { items } => {
                 let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
                 let edit = crate::legacy_core::config::edit::terminal_title_items_edit(&ids);
-                let apply_result = ConfigEditsBuilder::for_config(&self.config)
+                let apply_result = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .with_edits([edit])
                     .apply()
                     .await;
                 match apply_result {
                     Ok(()) => {
-                        self.config.tui_terminal_title = Some(ids.clone());
+                        self.local_settings.tui.terminal_title = Some(ids.clone());
                         self.chat_widget.setup_terminal_title(items);
                     }
                     Err(err) => {
@@ -2831,7 +2908,7 @@ impl App {
             }
             AppEvent::SyntaxThemeSelected { name } => {
                 let edit = crate::legacy_core::config::edit::syntax_theme_edit(&name);
-                let apply_result = ConfigEditsBuilder::for_config(&self.config)
+                let apply_result = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .with_edits([edit])
                     .apply()
                     .await;
@@ -2843,7 +2920,7 @@ impl App {
                         // navigating, the runtime theme must still be applied.
                         if let Some(theme) = crate::render::highlight::resolve_theme_by_name(
                             &name,
-                            Some(&self.config.codex_home),
+                            Some(&self.local_settings.codex_home),
                         ) {
                             crate::render::highlight::set_syntax_theme(theme);
                         }
@@ -2978,7 +3055,7 @@ impl App {
         intent: crate::app_event::KeymapEditIntent,
     ) {
         let outcome = match crate::keymap_setup::keymap_with_edit(
-            &self.config.tui_keymap,
+            &self.local_settings.tui.keymap,
             &self.keymap,
             &context,
             &action,
@@ -3016,14 +3093,14 @@ impl App {
 
         let edit =
             crate::legacy_core::config::edit::keymap_bindings_edit(&context, &action, &bindings);
-        match ConfigEditsBuilder::for_config(&self.config)
+        match ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
             .with_edits([edit])
             .apply()
             .await
         {
             Ok(()) => {
                 self.cancel_pending_key_chord();
-                self.config.tui_keymap = keymap_config.clone();
+                self.local_settings.tui.keymap = keymap_config.clone();
                 self.keymap = runtime_keymap.clone();
                 self.chat_widget
                     .apply_keymap_update(keymap_config, &runtime_keymap);
@@ -3049,7 +3126,7 @@ impl App {
 
     async fn apply_keymap_clear(&mut self, context: String, action: String) {
         let keymap_config = match crate::keymap_setup::keymap_without_custom_binding(
-            &self.config.tui_keymap,
+            &self.local_settings.tui.keymap,
             &context,
             &action,
         ) {
@@ -3070,14 +3147,14 @@ impl App {
         };
 
         let edit = crate::legacy_core::config::edit::keymap_binding_clear_edit(&context, &action);
-        match ConfigEditsBuilder::for_config(&self.config)
+        match ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
             .with_edits([edit])
             .apply()
             .await
         {
             Ok(()) => {
                 self.cancel_pending_key_chord();
-                self.config.tui_keymap = keymap_config.clone();
+                self.local_settings.tui.keymap = keymap_config.clone();
                 self.keymap = runtime_keymap.clone();
                 self.chat_widget
                     .apply_keymap_update(keymap_config, &runtime_keymap);

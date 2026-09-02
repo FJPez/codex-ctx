@@ -314,8 +314,8 @@ async fn effective_patch_permissions(
         .collect::<Result<Vec<_>, _>>()?;
     let effective_additional_permissions = apply_granted_turn_permissions(
         session,
-        environment_id,
-        native_cwd.as_path(),
+        environment,
+        cwd,
         crate::sandboxing::SandboxPermissions::UseDefault,
         write_permissions_for_paths(&native_file_paths, &file_system_sandbox_policy, &native_cwd),
     )
@@ -357,7 +357,10 @@ impl ToolExecutor<ToolInvocation> for ApplyPatchHandler {
         create_apply_patch_freeform_tool(self.multi_environment)
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }

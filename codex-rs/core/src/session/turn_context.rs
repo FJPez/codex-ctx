@@ -1,5 +1,8 @@
 use super::step_settings::ResolvedStepSettings;
+use super::token_budget::has_explicit_settings;
+use super::token_budget::resolve_token_budget;
 use super::*;
+use crate::config::TokenBudgetConfig;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::AllowPrefixRules;
@@ -18,6 +21,7 @@ use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::RawFileSystemSandboxPolicy;
 use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
@@ -44,9 +48,13 @@ pub(crate) struct TurnEnvironment {
     pub(crate) selection: TurnEnvironmentSelection,
     pub(crate) config_origin: EnvironmentConfigOrigin,
     pub(crate) environment: Arc<Environment>,
+    /// Cached from the selected executor; `None` means it did not report one.
+    pub(crate) user_home_dir: Option<PathUri>,
     /// Cached from the selected executor; `None` means it did not report them.
     pub(crate) temporary_directories: Option<Vec<PathUri>>,
     pub(crate) shell: Option<shell::Shell>,
+    /// OS reported by the selected executor; `None` for legacy executors.
+    pub(crate) executor_platform_os: Option<String>,
     pub(crate) shell_snapshot: ShellSnapshotTask,
     pub(crate) shell_snapshot_v2_supported: bool,
 }
@@ -63,8 +71,10 @@ impl TurnEnvironment {
             selection,
             config_origin,
             environment,
+            user_home_dir: None,
             temporary_directories: None,
             shell,
+            executor_platform_os: None,
             shell_snapshot: futures::future::ready(None).boxed().shared(),
             shell_snapshot_v2_supported: false,
         }
@@ -104,7 +114,7 @@ impl TurnEnvironment {
     }
 
     pub(crate) fn workspace_roots(&self) -> &[PathUri] {
-        &self.selection.workspace_roots
+        &self.config().workspace_roots
     }
 
     pub(crate) fn permission_profile(&self) -> &PermissionProfile {
@@ -127,6 +137,7 @@ impl TurnEnvironment {
             permissions: permissions.into(),
             cwd: Some(self.cwd().clone()),
             workspace_roots: self.workspace_roots().to_vec(),
+            user_home_dir: self.user_home_dir.clone(),
             temporary_directories: self.temporary_directories.clone(),
             windows_sandbox_level: executor_windows_sandbox_level(
                 config.windows_sandbox_level,
@@ -160,9 +171,11 @@ impl std::fmt::Debug for TurnEnvironment {
             .field("environment_id", &self.selection.environment_id)
             .field("environment", &self.environment)
             .field("cwd", &self.selection.cwd)
-            .field("workspace_roots", &self.selection.workspace_roots)
+            .field("workspace_roots", &self.config().workspace_roots)
+            .field("user_home_dir", &self.user_home_dir)
             .field("temporary_directories", &self.temporary_directories)
             .field("shell", &self.shell)
+            .field("executor_platform_os", &self.executor_platform_os)
             .field("config", self.config())
             .field("config_origin", &self.config_origin)
             .finish_non_exhaustive()
@@ -186,6 +199,10 @@ pub struct TurnContext {
     /// Turn-scoped configuration. Read step-specific settings such as service tier and
     /// approvals reviewer from the corresponding `StepContext` instead.
     pub config: Arc<Config>,
+    /// Preferences captured before token-budget defaults from the turn's initial model.
+    pub(crate) configured_token_budget: Option<TokenBudgetConfig>,
+    /// Captured once so later steps do not re-read config layers to detect user preferences.
+    pub(crate) use_model_token_budget_defaults: bool,
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
     /// Frozen settings used to construct this context. Legacy turn consumers
     /// keep this view even when later steps use different settings.
@@ -424,12 +441,7 @@ impl TurnContext {
     /// Legacy: returns the frozen initial-turn model context window.
     /// Step-scoped consumers should use their captured `StepContext::settings`.
     pub(crate) fn model_context_window(&self) -> Option<i64> {
-        let effective_context_window_percent = self.model_info().effective_context_window_percent;
-        self.model_info()
-            .resolved_context_window()
-            .map(|context_window| {
-                context_window.saturating_mul(effective_context_window_percent) / 100
-            })
+        self.model_info().usable_context_window()
     }
 
     pub(crate) fn apps_enabled(&self) -> bool {
@@ -502,6 +514,8 @@ impl TurnContext {
             realtime_active: self.realtime_active,
             code_mode_available: self.code_mode_available,
             config: Arc::new(config),
+            configured_token_budget: self.configured_token_budget.clone(),
+            use_model_token_budget_defaults: self.use_model_token_budget_defaults,
             auth_manager: self.auth_manager.clone(),
             initial_settings: Arc::clone(&step_settings),
             current_settings: ArcSwap::from(step_settings),
@@ -564,6 +578,7 @@ impl TurnContext {
         let cwd = self.cwd.clone();
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
+            root_turn_id: self.turn_metadata_state.root_turn_id(),
             cwd,
             workspace_roots: (!workspace_roots.is_empty()).then_some(workspace_roots),
             current_date: self.current_date.clone(),
@@ -724,7 +739,18 @@ impl Session {
         );
 
         let mut per_turn_config = per_turn_config;
-        super::token_budget::apply_model_defaults(&mut per_turn_config, model_info);
+        let configured_token_budget = per_turn_config.token_budget.clone();
+        let use_model_token_budget_defaults =
+            per_turn_config.features.enabled(Feature::TokenBudget)
+                && !has_explicit_settings(&per_turn_config);
+        per_turn_config.token_budget = resolve_token_budget(
+            configured_token_budget.as_ref(),
+            use_model_token_budget_defaults,
+            model_info,
+        );
+        if step_settings.reasoning_effort() == Some(&ReasoningEffort::Persistent) {
+            super::time_reminder::apply_persistent_defaults(&mut per_turn_config);
+        }
         per_turn_config.service_tier = step_settings.service_tier.clone();
         let permission_profile = environments.permission_profile_or_else(|| {
             per_turn_config.permissions.effective_permission_profile()
@@ -760,6 +786,8 @@ impl Session {
             realtime_active: false,
             code_mode_available: true,
             config: per_turn_config,
+            configured_token_budget,
+            use_model_token_budget_defaults,
             auth_manager,
             initial_settings: Arc::clone(&step_settings),
             current_settings: ArcSwap::from(step_settings),
@@ -830,6 +858,7 @@ impl Session {
                 self.send_event_raw(Event {
                     id: sub_id,
                     msg: EventMsg::Error(ErrorEvent {
+                        misalignment: None,
                         message: message.clone(),
                         codex_error_info: Some(CodexErrorInfo::BadRequest),
                     }),
@@ -1006,7 +1035,9 @@ impl Session {
                 .single_local_environment_cwd()
                 .is_some()
         {
-            turn_context.turn_metadata_state.spawn_git_enrichment_task();
+            turn_context
+                .turn_metadata_state
+                .spawn_git_enrichment_task(Arc::clone(&self.services.git_root_discovery));
         }
         turn_context
     }
@@ -1027,14 +1058,14 @@ impl Session {
 
         if !tc.code_mode_available
             && matches!(
-                crate::tools::requested_tool_mode(tc),
+                crate::tools::requested_tool_mode(tc, tc.model_info()),
                 codex_protocol::openai_models::ToolMode::CodeMode
                     | codex_protocol::openai_models::ToolMode::CodeModeOnly
             )
             && let Some(message) = self
                 .services
                 .code_mode_service
-                .take_unavailable_warning(crate::tools::effective_tool_mode(tc))
+                .take_unavailable_warning(crate::tools::effective_tool_mode(tc, tc.model_info()))
         {
             self.send_event(tc, EventMsg::Warning(WarningEvent { message }))
                 .await;

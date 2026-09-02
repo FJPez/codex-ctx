@@ -41,6 +41,7 @@ use codex_protocol::mcp::Tool;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::McpAuthStatus;
+use codex_rmcp_client::McpOAuthRefreshMode;
 use codex_utils_path_uri::PathUri;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::ReadResourceRequestParams;
@@ -128,12 +129,19 @@ pub struct McpConfig {
     pub codex_home: PathBuf,
     /// Preferred credential store for MCP OAuth tokens.
     pub mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode,
+    /// OAuth refresh ownership selected for new MCP connections.
+    pub oauth_refresh_mode: McpOAuthRefreshMode,
     /// Backend used when MCP OAuth storage is configured for keyring-backed persistence.
     pub auth_keyring_backend_kind: AuthKeyringBackendKind,
     /// Optional fixed localhost callback port for MCP OAuth login.
     pub mcp_oauth_callback_port: Option<u16>,
     /// Optional OAuth redirect URI override for MCP login.
     pub mcp_oauth_callback_url: Option<String>,
+    /// How long a tool catalog capture waits for optional MCP servers to initialize.
+    ///
+    /// A zero duration disables the shared grace and waits for each server's
+    /// configured startup timeout instead.
+    pub optional_mcp_startup_grace: Duration,
     /// Whether skill MCP dependency installation prompts are enabled.
     pub skill_mcp_dependency_install_enabled: bool,
     /// Approval policy used for MCP tool calls and MCP elicitation requests.
@@ -174,6 +182,9 @@ pub struct McpConfig {
     /// MCP registrations retain their own package attribution in the catalog.
     pub connector_snapshot: ConnectorSnapshot,
 }
+
+/// Default amount of time a tool catalog capture waits for optional MCP servers.
+pub const DEFAULT_OPTIONAL_MCP_STARTUP_GRACE: Duration = Duration::from_secs(1);
 
 impl McpConfig {
     /// Resolves enabled runtime servers against the exact attachment permissions being published.
@@ -431,7 +442,7 @@ pub async fn read_mcp_resource(
             codex_apps_tools_cache_key: connector_runtime_context_key(auth),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: auth.cloned(),
-            codex_apps_auth_manager: None,
+            auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },
@@ -506,7 +517,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
             codex_apps_tools_cache_key: connector_runtime_context_key(auth),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: auth.cloned(),
-            codex_apps_auth_manager: None,
+            auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },

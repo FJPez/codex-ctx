@@ -24,6 +24,7 @@ pub enum TurnInput {
         content: Vec<UserInput>,
         client_id: Option<String>,
     },
+    FunctionCallOutput(ResponseItem),
     // Preserve the existing serialized format while carrying injection API metadata
     // through the in-memory queue.
     ResponseItem(#[serde(with = "turn_input_response_item")] ResponseItemEnvelope),
@@ -104,7 +105,7 @@ impl InputQueue {
     ) {
         let activity_rx = self.activity_tx.subscribe();
         let has_pending_steer = if let Some(turn_state) = turn_state {
-            turn_state.lock().await.pending_input.has_user_input()
+            turn_state.lock().await.pending_input.has_pending_input()
         } else {
             false
         };
@@ -168,16 +169,16 @@ impl InputQueue {
             .and_then(|id| id.filter(|id| !id.trim().is_empty()).map(str::to_string));
         start_options.root_turn_id = pending_mails
             .iter()
-            .filter(|mail| mail.communication.trigger_turn)
-            .map(|mail| {
+            .find(|mail| mail.communication.trigger_turn)
+            .and_then(|mail| {
                 mail.start_options
                     .parent_turn_id
                     .as_deref()
                     .filter(|id| !id.trim().is_empty())
                     .and(mail.start_options.root_turn_id.as_deref())
+                    .filter(|id| !id.trim().is_empty())
             })
-            .reduce(|expected, candidate| expected.filter(|id| candidate == Some(*id)))
-            .and_then(|id| id.filter(|id| !id.trim().is_empty()).map(str::to_string));
+            .map(str::to_string);
         let items = pending_mails
             .into_iter()
             .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
@@ -319,17 +320,10 @@ impl InputQueue {
         }
         let (mailbox_items, start_options) = self.drain_mailbox_input_items().await;
         if let Some(active_turn_metadata) = active_turn_metadata
-            && mailbox_items.iter().any(|item| {
-                matches!(
-                    item,
-                    TurnInput::InterAgentCommunication(communication)
-                        if communication.trigger_turn
-                )
-            })
-            && (start_options.root_turn_id.is_none()
-                || active_turn_metadata.root_turn_id() != start_options.root_turn_id)
+            && active_turn_metadata.root_turn_id().is_none()
+            && let Some(root_turn_id) = start_options.root_turn_id.as_ref()
         {
-            active_turn_metadata.mark_root_turn_ambiguous();
+            active_turn_metadata.set_root_turn_id(root_turn_id.clone());
         }
         if pending_input.is_empty() {
             (mailbox_items, start_options)
@@ -369,10 +363,13 @@ impl InputQueue {
 }
 
 impl TurnInputQueue {
-    fn has_user_input(&self) -> bool {
-        self.items
-            .iter()
-            .any(|input| matches!(input, TurnInput::UserInput { .. }))
+    fn has_pending_input(&self) -> bool {
+        self.items.iter().any(|input| {
+            matches!(
+                input,
+                TurnInput::UserInput { .. } | TurnInput::FunctionCallOutput(_)
+            )
+        })
     }
 }
 
@@ -397,6 +394,7 @@ mod tests {
             item: ResponseItem::Other,
             metadata: Some(CodexHarnessMetadata {
                 client_authored: true,
+                ..Default::default()
             }),
         });
         assert!(serde_json::to_value(annotated).is_err());
@@ -492,6 +490,17 @@ mod tests {
     async fn input_queue_reports_already_pending_steer() {
         let input_queue = InputQueue::new();
         let turn_state = Mutex::new(TurnState::default());
+        let passive_output = serde_json::from_value(serde_json::json!({
+            "ResponseItem": {"type": "function_call_output", "name": "notify", "output": "passive"}
+        }))
+        .unwrap();
+        input_queue
+            .extend_pending_input_for_turn_state(&turn_state, vec![passive_output])
+            .await;
+        assert_eq!(
+            input_queue.subscribe_activity(Some(&turn_state)).await.1,
+            None
+        );
         input_queue
             .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
                 &turn_state,
@@ -545,7 +554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_queue_requires_one_unambiguous_trigger_parent() {
+    async fn input_queue_uses_unambiguous_trigger_parent_and_first_root() {
         let (parent, peer, root, root2) = (Some("a"), Some("b"), Some("r"), Some("s"));
         for (pending_mails, expected_parent_turn_id, expected_root_turn_id) in [
             (Vec::new(), None, None),
@@ -556,8 +565,8 @@ mod tests {
             (vec![(true, parent, None)], parent, None),
             (vec![(true, parent, Some(""))], parent, None),
             (vec![(true, parent, root), (true, peer, root)], None, root),
-            (vec![(true, parent, root), (true, peer, root2)], None, None),
-            (vec![(true, parent, root), (true, None, root)], None, None),
+            (vec![(true, parent, root), (true, peer, root2)], None, root),
+            (vec![(true, parent, root), (true, None, root)], None, root),
             (
                 vec![(true, parent, root), (true, parent, root)],
                 parent,

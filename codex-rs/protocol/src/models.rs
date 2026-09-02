@@ -41,6 +41,9 @@ pub use crate::permission_profile_snapshot::PermissionProfileSnapshot;
 pub use executed_tool_calls::ExecutedToolCall;
 pub use executed_tool_calls::ExecutedToolCallArguments;
 pub use executed_tool_calls::ExecutedToolCallTruncation;
+pub use executed_tool_calls::MAX_TOOL_RESULT_SOURCE_FIELD_BYTES;
+pub use executed_tool_calls::ToolResultSource;
+pub use executed_tool_calls::ToolResultSources;
 pub use executed_tool_calls::bound_executed_tool_calls_for_prompt;
 pub use executed_tool_calls::bound_executed_tool_calls_for_prompt_prioritizing_recent;
 pub use executed_tool_calls::executed_tool_call_metadata_bytes;
@@ -937,11 +940,23 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[schemars(skip)]
     #[ts(skip)]
     pub content_item_kinds: Option<Vec<ContentItemKind>>,
+    // Ignore input values so requests cannot fake tool call records.
+    /// Host-owned Code Mode cell shared by its `exec` and subsequent `wait` outputs.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub cell_id: Option<String>,
     /// Warehouse-only Responses metadata, not part of the public app-server protocol.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     #[ts(skip)]
     pub executed_tool_calls: Option<Vec<ExecutedToolCall>>,
+    /// Whether the host finished recording this cell's calls without losing calls or arguments.
+    /// This describes the call inventory across the cell's outputs, not tool success.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub tool_calls_complete: Option<bool>,
 }
 
 impl InternalChatMessageMetadataPassthrough {

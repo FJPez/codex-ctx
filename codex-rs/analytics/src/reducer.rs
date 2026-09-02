@@ -113,6 +113,9 @@ use crate::facts::TurnStatus;
 use crate::facts::TurnSteerRejectionReason;
 use crate::facts::TurnSteerResult;
 use crate::facts::TurnTokenUsageFact;
+use crate::guardian_v2::GuardianV2EventKind;
+use crate::guardian_v2::GuardianV2EventParams;
+use crate::guardian_v2::GuardianV2EventRequest;
 use crate::now_unix_millis;
 use crate::now_unix_seconds;
 use crate::option_i64_to_u64;
@@ -126,6 +129,7 @@ use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandAction;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
+use codex_app_server_protocol::CommandExecutionApprovalKind;
 use codex_app_server_protocol::CommandExecutionSource;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::DynamicToolCallOutputContentItem;
@@ -494,6 +498,7 @@ impl TurnToolCounts {
             ThreadItem::UserMessage { .. }
             | ThreadItem::HookPrompt { .. }
             | ThreadItem::AgentMessage { .. }
+            | ThreadItem::FunctionCallOutput { .. }
             | ThreadItem::Plan { .. }
             | ThreadItem::Reasoning { .. }
             | ThreadItem::ImageView { .. }
@@ -615,6 +620,68 @@ impl AnalyticsReducer {
                 }
                 CustomAnalyticsFact::Goal(input) => {
                     self.ingest_goal(*input, out);
+                }
+                CustomAnalyticsFact::ThreadHintStatus(input) => {
+                    if let Some((connection, thread, metadata)) =
+                        self.thread_context_or_warn(AnalyticsDropSite {
+                            event_name: "codex_thread_hint_status",
+                            thread_id: &input.thread_id,
+                            turn_id: None,
+                            review_id: None,
+                            item_id: None,
+                        })
+                    {
+                        out.push(TrackEventRequest::ThreadHintStatus(Box::new(
+                            crate::thread_hint::ThreadHintStatusEventRequest {
+                                event_type: "codex_thread_hint_status",
+                                event_params: crate::thread_hint::ThreadHintStatusEventParams {
+                                    thread_id: input.thread_id,
+                                    session_id: metadata.session_id.clone(),
+                                    app_server_client: thread.app_server_client(connection),
+                                    runtime: connection.runtime.clone(),
+                                    thread_source: metadata.thread_source.clone(),
+                                    subagent_source: metadata.subagent_source.clone(),
+                                    parent_thread_id: metadata.parent_thread_id.clone(),
+                                    status: input.status,
+                                    occurred_at_ms: input.occurred_at_ms,
+                                },
+                            },
+                        )));
+                    }
+                }
+                CustomAnalyticsFact::GuardianV2(input) => {
+                    let event_type = match &input.kind {
+                        GuardianV2EventKind::Classification { .. } => {
+                            "codex_guardian_v2_classification"
+                        }
+                        GuardianV2EventKind::FastDecision { .. } => {
+                            "codex_guardian_v2_fast_decision"
+                        }
+                    };
+                    if let Some((connection, thread, metadata)) =
+                        self.thread_context_or_warn(AnalyticsDropSite {
+                            event_name: event_type,
+                            thread_id: &input.thread_id,
+                            turn_id: Some(&input.turn_id),
+                            review_id: None,
+                            item_id: input.item_id.as_deref(),
+                        })
+                    {
+                        out.push(TrackEventRequest::GuardianV2(Box::new(
+                            GuardianV2EventRequest {
+                                event_type,
+                                event_params: GuardianV2EventParams {
+                                    session_id: metadata.session_id.clone(),
+                                    app_server_client: thread.app_server_client(connection),
+                                    runtime: connection.runtime.clone(),
+                                    thread_source: metadata.thread_source.clone(),
+                                    subagent_source: metadata.subagent_source.clone(),
+                                    parent_thread_id: metadata.parent_thread_id.clone(),
+                                    guardian_v2: *input,
+                                },
+                            },
+                        )));
+                    }
                 }
                 CustomAnalyticsFact::GuardianReview(input) => {
                     self.ingest_guardian_review(*input, out);
@@ -1089,9 +1156,13 @@ impl AnalyticsReducer {
         if thread_state.connection_id.is_none() {
             thread_state.connection_id = parent_connection_id;
         }
-        out.push(TrackEventRequest::ThreadInitialized(
-            subagent_thread_started_event_request(input),
-        ));
+        // Guardian prewarm can register lineage before parent client metadata is set.
+        // Keep the existing completeness requirement for the initialization event.
+        if input.client_name.is_some() && input.client_version.is_some() {
+            out.push(TrackEventRequest::ThreadInitialized(
+                subagent_thread_started_event_request(input),
+            ));
+        }
     }
 
     fn ingest_guardian_review(
@@ -1498,6 +1569,10 @@ impl AnalyticsReducer {
     fn ingest_server_request(&mut self, _connection_id: u64, request: ServerRequest) {
         match request {
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
+                let is_stdin_review = match params.kind {
+                    CommandExecutionApprovalKind::WriteStdin => true,
+                    CommandExecutionApprovalKind::Command => false,
+                };
                 let is_network_access_review = params.network_approval_context.is_some();
                 let requested_network_access = is_network_access_review
                     || params
@@ -1511,7 +1586,9 @@ impl AnalyticsReducer {
                         .and_then(|network| network.enabled)
                         .unwrap_or(false);
                 let requested_additional_permissions = params.additional_permissions.is_some();
-                let trigger = if params.approval_id.is_some() {
+                let trigger = if is_stdin_review {
+                    ReviewTrigger::Initial
+                } else if params.approval_id.is_some() {
                     ReviewTrigger::ExecveIntercept
                 } else if requested_network_access {
                     ReviewTrigger::NetworkPolicyDenial
@@ -1530,12 +1607,16 @@ impl AnalyticsReducer {
                         turn_id: params.turn_id,
                         item_id: Some(params.item_id),
                         review_id: user_review_id(&request_id),
-                        subject_kind: if is_network_access_review {
+                        subject_kind: if is_stdin_review {
+                            ReviewSubjectKind::WriteStdin
+                        } else if is_network_access_review {
                             ReviewSubjectKind::NetworkAccess
                         } else {
                             ReviewSubjectKind::CommandExecution
                         },
-                        subject_name: if is_network_access_review {
+                        subject_name: if is_stdin_review {
+                            "write_stdin".to_string()
+                        } else if is_network_access_review {
                             "network_access".to_string()
                         } else {
                             "command_execution".to_string()
@@ -2415,7 +2496,7 @@ fn warn_missing_analytics_context(
     );
 }
 
-fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
+pub(crate) fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
     match item {
         ThreadItem::CommandExecution { id, .. }
         | ThreadItem::FileChange { id, .. }
@@ -2427,6 +2508,7 @@ fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
         ThreadItem::UserMessage { .. }
         | ThreadItem::HookPrompt { .. }
         | ThreadItem::AgentMessage { .. }
+        | ThreadItem::FunctionCallOutput { .. }
         | ThreadItem::Plan { .. }
         | ThreadItem::Reasoning { .. }
         | ThreadItem::SubAgentActivity { .. }
@@ -3386,6 +3468,7 @@ fn codex_turn_event_params(
         service_tier,
         approval_policy,
         approvals_reviewer,
+        guardian_v2_enabled,
         sandbox_network_access,
         collaboration_mode,
         personality,
@@ -3409,6 +3492,8 @@ fn codex_turn_event_params(
         session_id: thread_metadata.session_id.clone(),
         turn_id,
         root_turn_id: turn_metadata.root_turn_id(),
+        turn_trigger: turn_metadata.turn_trigger(),
+        codex_turn_source: turn_metadata.codex_turn_source(),
         app_server_client,
         runtime,
         submission_type,
@@ -3430,6 +3515,7 @@ fn codex_turn_event_params(
             .unwrap_or_else(|| "default".to_string()),
         approval_policy: approval_policy.to_string(),
         approvals_reviewer: approvals_reviewer.to_string(),
+        guardian_v2_enabled,
         sandbox_network_access,
         collaboration_mode: Some(collaboration_mode_mode(collaboration_mode)),
         personality: personality_mode(personality),

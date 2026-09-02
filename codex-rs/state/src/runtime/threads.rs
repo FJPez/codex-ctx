@@ -1323,6 +1323,7 @@ pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
         | RolloutItem::WorldState(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::EventMsg(_) => None,
     })
 }
@@ -2568,6 +2569,7 @@ mod tests {
                 session_id: thread_id.into(),
                 id: thread_id,
                 forked_from_id: None,
+                forked_from_ordinal_exclusive: None,
                 parent_thread_id: None,
                 timestamp: metadata.created_at.to_rfc3339(),
                 cwd: PathBuf::new(),
@@ -2638,6 +2640,7 @@ mod tests {
                 session_id: thread_id.into(),
                 id: thread_id,
                 forked_from_id: None,
+                forked_from_ordinal_exclusive: None,
                 parent_thread_id: None,
                 timestamp: created_at,
                 cwd: PathBuf::new(),
