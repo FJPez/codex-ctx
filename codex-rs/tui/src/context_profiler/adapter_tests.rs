@@ -10,6 +10,8 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputPayload;
 use pretty_assertions::assert_eq;
 
 const THREAD: &str = "th_1";
@@ -66,6 +68,29 @@ fn custom_tool_call(call_id: &str) -> ResponseItem {
     }
 }
 
+fn custom_tool_call_output(call_id: &str) -> ResponseItem {
+    ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: call_id.to_string(),
+        name: None,
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text("ok".to_string()),
+            success: Some(true),
+        },
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn reasoning_item() -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: None,
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("opaque".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 fn raw_item(item: ResponseItem) -> ServerNotification {
     ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
         thread_id: THREAD.to_string(),
@@ -101,7 +126,7 @@ fn raw_usage_missing(response_id: &str) -> ServerNotification {
     })
 }
 
-fn token_usage(last_total: i64, window: i64) -> ServerNotification {
+fn token_usage_with(last_total: i64, window: Option<i64>) -> ServerNotification {
     let breakdown = |total: i64| TokenUsageBreakdown {
         total_tokens: total,
         input_tokens: total,
@@ -116,9 +141,13 @@ fn token_usage(last_total: i64, window: i64) -> ServerNotification {
         token_usage: ThreadTokenUsage {
             total: breakdown(last_total),
             last: breakdown(last_total),
-            model_context_window: Some(window),
+            model_context_window: window,
         },
     })
+}
+
+fn token_usage(last_total: i64, window: i64) -> ServerNotification {
+    token_usage_with(last_total, Some(window))
 }
 
 fn item_completed(item: ThreadItem) -> ServerNotification {
@@ -160,16 +189,16 @@ fn item_kinds(records: &[RecordedEvent]) -> Vec<(&str, u64)> {
         .collect()
 }
 
-/// Findings 6.2: usage arrives after a response's own items and before the tool output.
+/// Findings 6.2: response outputs, then raw usage, then the tool output, then token usage.
 #[test]
 fn replays_measured_capture() {
     let mut notifications = vec![turn_started()];
-    notifications.extend((0..8).map(|index| raw_item(message_item(&format!("item {index}")))));
-    notifications.push(raw_usage("resp_a", 25_230, 192));
+    notifications.extend((1..8).map(|index| raw_item(message_item(&format!("item {index}")))));
     notifications.push(raw_item(custom_tool_call("call_1")));
+    notifications.push(raw_usage("resp_a", 25_230, 192));
+    notifications.push(raw_item(custom_tool_call_output("call_1")));
     notifications.push(token_usage(25_422, 258_400));
-    notifications.push(raw_item(message_item("item 9")));
-    notifications.push(raw_item(message_item("item 10")));
+    notifications.push(raw_item(reasoning_item()));
     notifications.push(raw_usage("resp_b", 29_137, 93));
     notifications.push(token_usage(29_230, 258_400));
     notifications.push(turn_completed(TurnStatus::Completed));
@@ -184,7 +213,6 @@ fn replays_measured_capture() {
     assert_eq!(
         item_kinds(&records),
         vec![
-            ("Message", 0),
             ("Message", 1),
             ("Message", 2),
             ("Message", 3),
@@ -193,8 +221,8 @@ fn replays_measured_capture() {
             ("Message", 6),
             ("Message", 7),
             ("CustomToolCall", 8),
-            ("Message", 9),
-            ("Message", 10),
+            ("CustomToolCallOutput", 9),
+            ("Reasoning", 10),
         ]
     );
     assert_eq!(
@@ -223,7 +251,7 @@ fn replays_measured_capture() {
                 cache_write_input_tokens: 0,
                 output_tokens: 93,
                 reasoning_output_tokens: 0,
-                items_seq: 11,
+                items_seq: 10,
             },
             RecordedKind::WindowUpdated {
                 window: 258_400,
@@ -237,6 +265,76 @@ fn replays_measured_capture() {
     );
     assert_eq!(records[1].thread_id, THREAD);
     assert_eq!(records[1].turn_id, Some(TURN.to_string()));
+}
+
+/// A token usage update without a window must not consume the pending anchor.
+#[test]
+fn a_windowless_update_keeps_the_anchor() {
+    let records = observe_all(&[
+        raw_usage("resp_a", 100, 10),
+        token_usage_with(110, None),
+        token_usage(110, 258_400),
+    ]);
+
+    assert_eq!(
+        records,
+        vec![
+            record(RecordedKind::Usage {
+                response_id: "resp_a".to_string(),
+                reported_context_tokens: 110,
+                input_tokens: 100,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 10,
+                reasoning_output_tokens: 0,
+                items_seq: 0,
+            }),
+            record(RecordedKind::WindowUpdated {
+                window: 258_400,
+                matches_anchor: Some(true),
+            }),
+        ]
+    );
+}
+
+/// The adapter owns no accounting formula: the protocol's total is recorded as is.
+#[test]
+fn the_protocol_total_is_authoritative() {
+    let inconsistent = ServerNotification::RawResponseCompleted(RawResponseCompletedNotification {
+        thread_id: THREAD.to_string(),
+        turn_id: TURN.to_string(),
+        response_id: "resp_a".to_string(),
+        usage: Some(TokenUsageBreakdown {
+            total_tokens: 999,
+            input_tokens: 100,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 10,
+            reasoning_output_tokens: 0,
+        }),
+        usage_metadata: None,
+    });
+    let records = observe_all(&[inconsistent, token_usage(999, 258_400)]);
+
+    assert_eq!(
+        records,
+        vec![
+            record(RecordedKind::Usage {
+                response_id: "resp_a".to_string(),
+                reported_context_tokens: 999,
+                input_tokens: 100,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 10,
+                reasoning_output_tokens: 0,
+                items_seq: 0,
+            }),
+            record(RecordedKind::WindowUpdated {
+                window: 258_400,
+                matches_anchor: Some(true),
+            }),
+        ]
+    );
 }
 
 /// Findings 10.1: an interrupted turn strands items past the last anchor and sends no usage.
@@ -373,7 +471,7 @@ fn serializes_one_line_per_variant() {
         vec![
             r#"{"thread_id":"th_1","turn_id":null,"kind":"attached"}"#,
             r#"{"thread_id":"th_1","turn_id":"tu_1","kind":"turn_started"}"#,
-            r#"{"thread_id":"th_1","turn_id":"tu_1","kind":"item","item_kind":"CustomToolCall","bytes":74,"items_seq":0,"stamped_turn_id":null,"call_id":"call_1"}"#,
+            r#"{"thread_id":"th_1","turn_id":"tu_1","kind":"item","item_kind":"CustomToolCall","bytes":74,"items_seq":1,"stamped_turn_id":null,"call_id":"call_1"}"#,
             r#"{"thread_id":"th_1","turn_id":"tu_1","kind":"usage","response_id":"resp_a","reported_context_tokens":25422,"input_tokens":25230,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":192,"reasoning_output_tokens":0,"items_seq":1}"#,
             r#"{"thread_id":"th_1","turn_id":"tu_1","kind":"window_updated","window":258400,"matches_anchor":true}"#,
             r#"{"thread_id":"th_1","turn_id":"tu_1","kind":"missing_usage","response_id":"resp_b"}"#,
@@ -439,5 +537,5 @@ fn burst_of_notifications_keeps_every_item_in_order() {
 
     assert_eq!(records.len(), 10_000);
     assert_eq!(items.len(), 9_000);
-    assert_eq!(items.last(), Some(&("Message", 8_999)));
+    assert_eq!(items.last(), Some(&("Message", 9_000)));
 }

@@ -86,8 +86,8 @@ fn attaching_writes_attached_before_observed_records() {
         vec!["attached", "item", "item"]
     );
     assert_eq!(records[0]["thread_id"], thread_id.to_string());
-    assert_eq!(records[1]["items_seq"], 0);
-    assert_eq!(records[2]["items_seq"], 1);
+    assert_eq!(records[1]["items_seq"], 1);
+    assert_eq!(records[2]["items_seq"], 2);
 }
 
 #[test]
@@ -186,8 +186,8 @@ fn reattaching_restarts_the_item_sequence() {
         kinds(dir.path()),
         vec!["attached", "item", "attached", "item"]
     );
-    assert_eq!(records[1]["items_seq"], 0);
-    assert_eq!(records[3]["items_seq"], 0);
+    assert_eq!(records[1]["items_seq"], 1);
+    assert_eq!(records[3]["items_seq"], 1);
 }
 
 #[test]

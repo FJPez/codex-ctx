@@ -114,7 +114,8 @@ impl ThreadProfilerAdapter {
                 RecordFields::default(),
             )),
             ServerNotification::RawResponseItemCompleted(params) => {
-                let record = to_record(
+                self.items_seq += 1;
+                Some(to_record(
                     &params.thread_id,
                     ProfilerEvent::Item {
                         turn_id: &params.turn_id,
@@ -122,13 +123,11 @@ impl ThreadProfilerAdapter {
                     },
                     self.items_seq,
                     RecordFields::default(),
-                );
-                self.items_seq += 1;
-                Some(record)
+                ))
             }
             ServerNotification::RawResponseCompleted(params) => match &params.usage {
                 Some(usage) => {
-                    let anchor_total = usage.input_tokens + usage.output_tokens;
+                    let anchor_total = usage.total_tokens;
                     self.last_anchor_total = Some(anchor_total);
                     Some(to_record(
                         &params.thread_id,
@@ -163,12 +162,11 @@ impl ThreadProfilerAdapter {
                 }
             },
             ServerNotification::ThreadTokenUsageUpdated(params) => {
-                let reported = params.token_usage.last.total_tokens;
+                let window = params.token_usage.model_context_window?;
                 let matches_anchor = self
                     .last_anchor_total
                     .take()
-                    .map(|anchor| anchor == reported);
-                let window = params.token_usage.model_context_window?;
+                    .map(|anchor| anchor == params.token_usage.last.total_tokens);
                 Some(to_record(
                     &params.thread_id,
                     ProfilerEvent::WindowUpdated {

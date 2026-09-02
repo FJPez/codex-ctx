@@ -406,9 +406,10 @@ The adapter keeps two fields, `items_seq` and `last_anchor_total`, with this sur
 | Event | `items_seq` | `last_anchor_total` |
 |---|---|---|
 | `turn_started` | kept | kept (a boundary does not invalidate the pairing) |
-| `item` | +1 | kept |
+| `item` | incremented, then stamped - every record means "items observed so far" | kept |
 | raw usage (`Some`) | kept | replaced (recency pairs correctly when the older counterpart never arrived) |
 | `window_updated` compare | kept | consumed via `Option::take()` - one anchor, one comparison |
+| token usage with no window | kept | kept - no record can be produced, so nothing is consumed |
 | `missing_usage` | kept | cleared (`matches_anchor: None` = nothing valid to compare, not "false") |
 | `invalidated` | kept - the record IS the segment boundary | cleared |
 | adapter removal then recreation | resets to 0, legible because `attached` precedes it | fresh `None` |
@@ -416,9 +417,12 @@ The adapter keeps two fields, `items_seq` and `last_anchor_total`, with this sur
 `attached` is trace-lifecycle only, always a new adapter's first record; an `items_seq`
 decrease is valid only immediately after one. There is no `detached` - EOF or a later
 `attached` carries the information. Adapters are created only for the **displayed** thread
-(`ProfilerRegistry::observe`'s `allow_create` gate): helper and subagent threads inherit the
-raw-events flag server-side but are never profiled, and a fork is caught the moment it becomes
-the displayed session, its mid-stream join marked by `attached`.
+(`ProfilerRegistry::observe`'s `allow_create` gate). Two exclusions, two mechanisms: TUI helper
+threads never request raw events in the first place (`ThreadRole::Helper` at the
+`thread/start` call sites, pinned by `helper_thread_never_requests_raw_events`), while
+server-side forks *inherit* `experimental_raw_events` from their parent and are held out by
+the creation gate until they become the displayed session, their mid-stream join marked by
+`attached`.
 
 ### No epochs in the MVP
 
