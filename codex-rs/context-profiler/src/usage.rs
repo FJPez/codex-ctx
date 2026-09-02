@@ -9,7 +9,6 @@ pub struct UsageSnapshot {
     pub cache_write_input_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
-    pub model_context_window: Option<i64>,
     /// Number of items observed when this anchor arrived.
     pub items_seq: u64,
 }

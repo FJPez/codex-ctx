@@ -241,6 +241,8 @@ pub enum ProfilerEvent<'a> {
     TurnStarted { turn_id: &'a str },
     Item        { turn_id: &'a str, item: &'a ResponseItem },
     Usage       { turn_id: &'a str, usage: UsageSnapshot },
+    /// The model context window reported by `thread/tokenUsage/updated`.
+    WindowUpdated { turn_id: &'a str, window: i64 },
     TurnEnded   { turn_id: &'a str, completed: bool },
     /// Attribution can no longer be trusted from here on.
     Invalidated { reason: InvalidationReason },
@@ -249,10 +251,25 @@ pub enum ProfilerEvent<'a> {
 pub enum InvalidationReason {
     /// The app-server event consumer lagged; `AppServerEvent::Lagged { skipped: usize }`.
     EventsDropped { skipped: usize },
-    /// `thread/compacted`. History was rewritten out from under us.
+    /// A compaction item was observed. History was rewritten out from under us.
     Compacted,
 }
 ```
+
+This event contract is final: the six variants above are the whole input surface, and adapters
+map every stream they consume onto them.
+
+**`WindowUpdated` is a separate event because the window is not a property of an anchor.** The
+model context window is not constant for a session - `/model` switches the model mid-session - so
+a window value riding on each `UsageSnapshot` would be stale for a whole turn after a switch, and
+a folded anchor cannot be amended retroactively. The window therefore has one source,
+`thread/tokenUsage/updated`, and the profiler keeps only the latest value.
+
+**Compaction has exactly one observable source on the v2 protocol:** an `ItemCompleted`
+notification whose item is `ThreadItem::ContextCompaction { id }`. The deprecated
+`ContextCompacted` notification is never sent to v2 clients - core still fans out the event for
+raw-event and rollout consumers, but the app-server drops it
+(`app-server/src/bespoke_event_handling.rs:1002`). Adapters must not wait for it.
 
 **`Invalidated` collapses three earlier concepts into one.** A previous draft had a separate
 `StreamGap` event, a `Compacted` event, epoch sealing, and an `AttributionCompleteness` enum.
@@ -328,7 +345,6 @@ pub struct UsageSnapshot {
     pub cache_write_input_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
-    pub model_context_window: Option<i64>,
     pub items_seq: u64,                 // items observed when this anchor arrived
 }
 ```
@@ -346,21 +362,14 @@ double-count every anchor.
 | path | anchor source | role |
 |---|---|---|
 | Live | `rawResponse/completed` | **primary anchor** - arrives first, carries `response_id` and the input/output split |
-| Live | `thread/tokenUsage/updated` | supplies `model_context_window`; anchor **only** as fallback when raw events are unavailable |
+| Live | `thread/tokenUsage/updated` | emits `WindowUpdated`; anchor **only** as fallback when raw events are unavailable |
 | Rollout | `EventMsg::TokenCount` | anchor (the only usage record persisted) |
 
-**The merge needs an explicit mechanism.** Raw usage arrives first and carries no window; the
-window arrives later on `thread/tokenUsage/updated`. A folded event cannot be amended
-retroactively, so the adapter buffers:
-
-```
-RawResponseCompleted{ usage: Some(u) }  →  pending[turn_id] = u
-ThreadTokenUsageUpdated                 →  if last.total_tokens == pending.reported
-                                              emit one merged Usage
-                                           else
-                                              emit pending unmerged, window = None
-flush on TurnEnded                      →  emit any unpaired pending
-```
+**No merge is needed.** Raw usage arrives first and carries no window; the window arrives later on
+`thread/tokenUsage/updated`. Rather than buffer an anchor so a window can be folded into it, the
+adapter emits the two independently - `Usage` from `rawResponse/completed`, `WindowUpdated` from
+`thread/tokenUsage/updated` - and the profiler keeps the latest window alongside the anchor list.
+That also keeps the window correct across a mid-session `/model` switch.
 
 `RawResponseCompletedNotification.usage` is `Option<…>`. When it is `None` — cancelled or failed
 attempts — **emit no anchor** and increment `missing_usage_count` in diagnostics. An anchor with a
@@ -1021,8 +1030,8 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
    Needs drift data before deciding.
 3. **Rollout-backed compaction enrichment on the live path** (M5). `CompactedItem` carries
    `replacement_history`, which the live notification does not, but the recorder writes
-   asynchronously (`rollout/src/recorder.rs:1971`) so there is no flush guarantee when
-   `thread/compacted` arrives.
+   asynchronously (`rollout/src/recorder.rs:1971`) so there is no flush guarantee when the
+   `ContextCompaction` item arrives.
 
 ### Resolved since the first draft
 
