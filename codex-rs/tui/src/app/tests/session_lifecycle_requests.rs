@@ -1034,6 +1034,38 @@ async fn helper_thread_never_requests_raw_events() -> Result<()> {
 }
 
 #[tokio::test]
+async fn startup_thread_requests_raw_events_when_feature_enabled() -> Result<()> {
+    let (mut app, _codex_home) = make_history_test_app().await?;
+    app.config
+        .features
+        .enable(Feature::ContextProfiler)
+        .expect("test config should allow the context profiler");
+    let (app_server, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+
+    crate::app_server_session::start_thread_with_request_handle(
+        app_server.request_handle(),
+        app.config.clone(),
+        crate::app_server_session::ThreadParamsMode::Embedded,
+        /*remote_cwd_override*/ None,
+        app_server.thread_tool_transport(),
+    )
+    .await?;
+
+    let starts = recorded_params(&requests, "thread/start");
+    let params: ThreadStartParams = serde_json::from_value(starts[0].clone())?;
+    assert!(params.experimental_raw_events);
+
+    app_server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn embedded_server_rejects_unowned_dynamic_tool_calls() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
