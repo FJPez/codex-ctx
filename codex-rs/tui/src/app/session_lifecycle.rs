@@ -11,6 +11,7 @@ use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
 use super::*;
+use crate::app_server_session::ThreadRole;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
 use codex_config::types::ResumeCwdMode;
@@ -760,6 +761,7 @@ impl App {
                 &config,
                 session_start_source,
                 /*remote_cwd_override*/ None,
+                ThreadRole::Primary,
             )
             .await
         {

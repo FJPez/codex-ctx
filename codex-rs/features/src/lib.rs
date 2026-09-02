@@ -269,6 +269,8 @@ pub enum Feature {
     ItemIds,
     /// Request sequential cutoff reasoning summary delivery.
     ConcurrentReasoningSummaries,
+    /// Context profiler: request raw response items and usage for the primary thread.
+    ContextProfiler,
     /// Allow prompting and installing missing MCP dependencies.
     SkillMcpDependencyInstall,
     /// Run cheap skill-search methods in shadow mode and emit experiment metrics.
@@ -1380,6 +1382,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ConcurrentReasoningSummaries,
         key: "concurrent_reasoning_summaries",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ContextProfiler,
+        key: "context_profiler",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

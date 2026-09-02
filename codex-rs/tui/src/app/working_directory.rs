@@ -3,6 +3,7 @@
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::app_server_session::ForkGoalContinuation::DeferUntilNextTurn;
+use crate::app_server_session::ThreadRole;
 use crate::history_cell::McpInventoryLoadingCell as LoadingCell;
 use codex_app_server_protocol::ThreadBackgroundTerminalsListParams;
 use codex_app_server_protocol::ThreadBackgroundTerminalsListResponse as ListResponse;
@@ -143,7 +144,10 @@ impl App {
         } else {
             app_server
                 .start_thread_with_session_start_source(
-                    &config, /*session_start_source*/ None, /*remote_cwd_override*/ None,
+                    &config,
+                    /*session_start_source*/ None,
+                    /*remote_cwd_override*/ None,
+                    ThreadRole::Primary,
                 )
                 .await
         };
