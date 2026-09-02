@@ -969,6 +969,9 @@ impl App {
         if self.abandoned_side_threads.contains(&thread_id) {
             return Ok(());
         }
+        let allow_create = self.current_displayed_thread_id() == Some(thread_id);
+        self.profiler
+            .observe(&thread_id, &notification, allow_create);
         if self.current_displayed_thread_id() == Some(thread_id)
             && let ServerNotification::TurnCompleted(notification) = &notification
         {

@@ -18,6 +18,11 @@ pub enum ProfilerEvent<'a> {
         turn_id: &'a str,
         usage: UsageSnapshot,
     },
+    /// The model context window reported by `thread/tokenUsage/updated`.
+    WindowUpdated {
+        turn_id: &'a str,
+        window: i64,
+    },
     TurnEnded {
         turn_id: &'a str,
         completed: bool,

@@ -241,6 +241,8 @@ pub enum ProfilerEvent<'a> {
     TurnStarted { turn_id: &'a str },
     Item        { turn_id: &'a str, item: &'a ResponseItem },
     Usage       { turn_id: &'a str, usage: UsageSnapshot },
+    /// The model context window reported by `thread/tokenUsage/updated`.
+    WindowUpdated { turn_id: &'a str, window: i64 },
     TurnEnded   { turn_id: &'a str, completed: bool },
     /// Attribution can no longer be trusted from here on.
     Invalidated { reason: InvalidationReason },
@@ -249,10 +251,25 @@ pub enum ProfilerEvent<'a> {
 pub enum InvalidationReason {
     /// The app-server event consumer lagged; `AppServerEvent::Lagged { skipped: usize }`.
     EventsDropped { skipped: usize },
-    /// `thread/compacted`. History was rewritten out from under us.
+    /// A compaction item was observed. History was rewritten out from under us.
     Compacted,
 }
 ```
+
+This event contract is final: the six variants above are the whole input surface, and adapters
+map every stream they consume onto them.
+
+**`WindowUpdated` is a separate event because the window is not a property of an anchor.** The
+model context window is not constant for a session - `/model` switches the model mid-session - so
+a window value riding on each `UsageSnapshot` would be stale for a whole turn after a switch, and
+a folded anchor cannot be amended retroactively. The window therefore has one source,
+`thread/tokenUsage/updated`, and the profiler keeps only the latest value.
+
+**Compaction has exactly one observable source on the v2 protocol:** an `ItemCompleted`
+notification whose item is `ThreadItem::ContextCompaction { id }`. The deprecated
+`ContextCompacted` notification is never sent to v2 clients - core still fans out the event for
+raw-event and rollout consumers, but the app-server drops it
+(`app-server/src/bespoke_event_handling.rs:1002`). Adapters must not wait for it.
 
 **`Invalidated` collapses three earlier concepts into one.** A previous draft had a separate
 `StreamGap` event, a `Compacted` event, epoch sealing, and an `AttributionCompleteness` enum.
@@ -328,7 +345,6 @@ pub struct UsageSnapshot {
     pub cache_write_input_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
-    pub model_context_window: Option<i64>,
     pub items_seq: u64,                 // items observed when this anchor arrived
 }
 ```
@@ -346,21 +362,14 @@ double-count every anchor.
 | path | anchor source | role |
 |---|---|---|
 | Live | `rawResponse/completed` | **primary anchor** - arrives first, carries `response_id` and the input/output split |
-| Live | `thread/tokenUsage/updated` | supplies `model_context_window`; anchor **only** as fallback when raw events are unavailable |
+| Live | `thread/tokenUsage/updated` | emits `WindowUpdated`; anchor **only** as fallback when raw events are unavailable |
 | Rollout | `EventMsg::TokenCount` | anchor (the only usage record persisted) |
 
-**The merge needs an explicit mechanism.** Raw usage arrives first and carries no window; the
-window arrives later on `thread/tokenUsage/updated`. A folded event cannot be amended
-retroactively, so the adapter buffers:
-
-```
-RawResponseCompleted{ usage: Some(u) }  →  pending[turn_id] = u
-ThreadTokenUsageUpdated                 →  if last.total_tokens == pending.reported
-                                              emit one merged Usage
-                                           else
-                                              emit pending unmerged, window = None
-flush on TurnEnded                      →  emit any unpaired pending
-```
+**No merge is needed.** Raw usage arrives first and carries no window; the window arrives later on
+`thread/tokenUsage/updated`. Rather than buffer an anchor so a window can be folded into it, the
+adapter emits the two independently - `Usage` from `rawResponse/completed`, `WindowUpdated` from
+`thread/tokenUsage/updated` - and the profiler keeps the latest window alongside the anchor list.
+That also keeps the window correct across a mid-session `/model` switch.
 
 `RawResponseCompletedNotification.usage` is `Option<…>`. When it is `None` — cancelled or failed
 attempts — **emit no anchor** and increment `missing_usage_count` in diagnostics. An anchor with a
@@ -375,6 +384,51 @@ it is what the live/rollout equivalence test checks.
 The field is deliberately not named `total_tokens`. `ThreadTokenUsage` carries both `total` and
 `last` with opposite meanings (`tui/src/token_usage.rs:37`): `total` accumulates across the
 session and exceeds the window on any long thread; `last` tracks occupancy.
+
+### The M2b trace representation
+
+The whole pipeline - and every case in this section, normal and degraded - is diagrammed in
+[2026-09-02-context-reconstruction.md](./2026-09-02-context-reconstruction.md).
+
+M2b writes each observation as one owned, serialize-only `RecordedEvent` line
+(`tui/src/context_profiler/adapter.rs`): `{ thread_id, turn_id, ...kind }` with the kind
+internally tagged snake_case: `attached`, `turn_started`, `item` (variant name, serialized
+bytes, `items_seq`, stamped turn id, `call_id` - never item text), `usage` (response id, token
+fields, `items_seq`), `missing_usage`, `window_updated` (`window`, `matches_anchor`),
+`turn_ended` (`completed`, raw status), `invalidated` (reason). The trace file is
+`<log_dir>/context-profiler-<UTC-ts>-<pid>.jsonl`, append-only, 0o600; a write failure warns
+once and drops the writer - the session is never degraded to protect a trace.
+`specs/tools/analyse_capture.py` reads this format directly, tolerating a malformed final line
+only (an interrupted write; anything earlier is corruption and fails loudly).
+
+`items_seq` counts observed raw items only - it is never a server context size. Hidden context
+(base instructions, tool schemas) is request scaffolding *beside* the item list, not a set of
+unobserved items, so no `items_seq` accounting ever includes it; the residual sizes it instead.
+In the live captures the first anchor sits at `items_seq` 8: five input fragments plus the
+response's own reasoning, commentary message, and tool call.
+
+The adapter keeps two fields, `items_seq` and `last_anchor_total`, with this survival contract:
+
+| Event | `items_seq` | `last_anchor_total` |
+|---|---|---|
+| `turn_started` | kept | kept (a boundary does not invalidate the pairing) |
+| `item` | incremented, then stamped - every record means "items observed so far" | kept |
+| raw usage (`Some`) | kept | replaced (recency pairs correctly when the older counterpart never arrived) |
+| `window_updated` compare | kept | consumed via `Option::take()` - one anchor, one comparison |
+| token usage with no window | kept | kept - no record can be produced, so nothing is consumed |
+| `missing_usage` | kept | cleared (`matches_anchor: None` = nothing valid to compare, not "false") |
+| `invalidated` | kept - the record IS the segment boundary | cleared |
+| adapter removal then recreation | resets to 0, legible because `attached` precedes it | fresh `None` |
+
+`attached` is trace-lifecycle only, always a new adapter's first record; an `items_seq`
+decrease is valid only immediately after one. There is no `detached` - EOF or a later
+`attached` carries the information. Adapters are created only for the **displayed** thread
+(`ProfilerRegistry::observe`'s `allow_create` gate). Two exclusions, two mechanisms: TUI helper
+threads never request raw events in the first place (`ThreadRole::Helper` at the
+`thread/start` call sites, pinned by `helper_thread_never_requests_raw_events`), while
+server-side forks *inherit* `experimental_raw_events` from their parent and are held out by
+the creation gate until they become the displayed session, their mid-stream join marked by
+`attached`.
 
 ### No epochs in the MVP
 
@@ -1021,8 +1075,12 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
    Needs drift data before deciding.
 3. **Rollout-backed compaction enrichment on the live path** (M5). `CompactedItem` carries
    `replacement_history`, which the live notification does not, but the recorder writes
-   asynchronously (`rollout/src/recorder.rs:1971`) so there is no flush guarantee when
-   `thread/compacted` arrives.
+   asynchronously (`rollout/src/recorder.rs:1971`) so there is no flush guarantee when the
+   `ContextCompaction` item arrives.
+4. **`RolloutItem::TokenUsageRecord`** (M7). The upstream sync added a persisted per-response
+   token usage record to the rollout. If it anchors the way `EventMsg::TokenCount` does, M7
+   hydration may get measured per-item costs for the replayed prefix too, not just the live
+   suffix. Assess when M7 starts.
 
 ### Resolved since the first draft
 
