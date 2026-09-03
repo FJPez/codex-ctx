@@ -236,7 +236,7 @@ fn to_record(
         ProfilerEvent::Item { turn_id, item } => (
             Some(turn_id.to_string()),
             RecordedKind::Item {
-                item_kind: item_kind(item).as_str().to_string(),
+                item_kind: item_kind(item).to_string(),
                 bytes: serialized_size(item).unwrap_or(0),
                 items_seq,
                 stamped_turn_id: item.turn_id().map(str::to_string),

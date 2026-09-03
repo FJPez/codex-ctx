@@ -24,7 +24,6 @@ pub use item::ItemSummary;
 pub use item::PartMedia;
 pub use item::PricingKind;
 pub use item::TokenCost;
-pub use kind::ItemKind;
 pub use kind::call_id;
 pub use kind::item_kind;
 pub use profiler::ContextProfiler;

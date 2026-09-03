@@ -99,7 +99,7 @@ impl ContextProfiler {
                     pricing: classification.pricing,
                     bytes: size.unwrap_or(0),
                     cost: TokenCost::Estimated(estimate),
-                    label: item_kind(item).as_str().to_string(),
+                    label: item_kind(item).to_string(),
                     group,
                     item_id: item.id().map(ToString::to_string),
                     parts: classification.parts,

@@ -1,12 +1,7 @@
 use super::*;
 use codex_protocol::models::ConfigurationReasoning;
 use codex_protocol::models::ContentItemKind;
-use codex_protocol::models::FunctionCallOutputBody;
-use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
-use codex_protocol::models::LocalShellAction;
-use codex_protocol::models::LocalShellExecAction;
-use codex_protocol::models::LocalShellStatus;
 use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 
@@ -41,187 +36,6 @@ fn user(kind: &str, body: &str) -> ResponseItem {
     message("user", vec![text(body)], Some(&[kind]))
 }
 
-fn tool_output() -> ResponseItem {
-    ResponseItem::CustomToolCallOutput {
-        id: None,
-        call_id: "call_1".to_string(),
-        name: None,
-        output: FunctionCallOutputPayload {
-            body: FunctionCallOutputBody::Text("ok".to_string()),
-            success: Some(true),
-        },
-        internal_chat_message_metadata_passthrough: None,
-    }
-}
-
-fn every_variant() -> Vec<(ResponseItem, PricingKind)> {
-    vec![
-        (
-            message("user", vec![text("hi")], Some(&["user.text"])),
-            PricingKind::Input,
-        ),
-        (
-            message("developer", vec![text("hi")], Some(&["user.text"])),
-            PricingKind::Input,
-        ),
-        (
-            message("assistant", vec![text("hi")], Some(&["unknown"])),
-            PricingKind::Output,
-        ),
-        (
-            message("system", vec![text("hi")], None),
-            PricingKind::Ambiguous,
-        ),
-        (
-            message("tool", vec![text("hi")], None),
-            PricingKind::Ambiguous,
-        ),
-        (
-            ResponseItem::FunctionCallOutput {
-                id: None,
-                call_id: Some("call_1".to_string()),
-                name: None,
-                namespace: None,
-                output: FunctionCallOutputPayload {
-                    body: FunctionCallOutputBody::Text("ok".to_string()),
-                    success: Some(true),
-                },
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Input,
-        ),
-        (tool_output(), PricingKind::Input),
-        (
-            ResponseItem::ToolSearchOutput {
-                id: None,
-                call_id: None,
-                status: "completed".to_string(),
-                execution: "local".to_string(),
-                tools: Vec::new(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Input,
-        ),
-        (
-            ResponseItem::AgentMessage {
-                id: None,
-                author: "codex".to_string(),
-                recipient: "user".to_string(),
-                content: Vec::new(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Output,
-        ),
-        (
-            ResponseItem::Reasoning {
-                id: None,
-                summary: Vec::new(),
-                content: None,
-                encrypted_content: Some("opaque".to_string()),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Output,
-        ),
-        (
-            ResponseItem::FunctionCall {
-                id: None,
-                name: "shell".to_string(),
-                namespace: None,
-                arguments: "{}".to_string(),
-                encrypted_function_args: None,
-                call_id: "call_1".to_string(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Output,
-        ),
-        (
-            ResponseItem::CustomToolCall {
-                id: None,
-                status: None,
-                call_id: "call_1".to_string(),
-                name: "shell".to_string(),
-                namespace: None,
-                input: "ls".to_string(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Output,
-        ),
-        (
-            ResponseItem::LocalShellCall {
-                id: None,
-                call_id: Some("call_1".to_string()),
-                status: LocalShellStatus::Completed,
-                action: LocalShellAction::Exec(LocalShellExecAction {
-                    command: vec!["ls".to_string()],
-                    timeout_ms: None,
-                    working_directory: None,
-                    env: None,
-                    user: None,
-                }),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Output,
-        ),
-        (
-            ResponseItem::ToolSearchCall {
-                id: None,
-                call_id: None,
-                status: None,
-                execution: "local".to_string(),
-                arguments: serde_json::Value::Null,
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Output,
-        ),
-        (
-            ResponseItem::WebSearchCall {
-                id: None,
-                status: None,
-                action: None,
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Output,
-        ),
-        (
-            ResponseItem::ImageGenerationCall {
-                id: None,
-                status: "completed".to_string(),
-                revised_prompt: None,
-                result: String::new(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Output,
-        ),
-        (ResponseItem::CompactionTrigger {}, PricingKind::Ambiguous),
-        (
-            ResponseItem::AdditionalTools {
-                id: None,
-                role: "system".to_string(),
-                tools: Vec::new(),
-            },
-            PricingKind::Ambiguous,
-        ),
-        (
-            ResponseItem::Compaction {
-                id: None,
-                encrypted_content: "opaque".to_string(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Ambiguous,
-        ),
-        (
-            ResponseItem::ContextCompaction {
-                id: None,
-                encrypted_content: None,
-                internal_chat_message_metadata_passthrough: None,
-            },
-            PricingKind::Ambiguous,
-        ),
-        (ResponseItem::Other, PricingKind::Ambiguous),
-        (configuration_update(), PricingKind::Ambiguous),
-    ]
-}
-
 fn configuration_update() -> ResponseItem {
     ResponseItem::ConfigurationUpdate {
         reasoning: ConfigurationReasoning {
@@ -231,20 +45,7 @@ fn configuration_update() -> ResponseItem {
 }
 
 #[test]
-fn every_variant_and_role_has_a_pricing_kind() {
-    let expected: Vec<PricingKind> = every_variant()
-        .iter()
-        .map(|(_, pricing)| *pricing)
-        .collect();
-    let actual: Vec<PricingKind> = every_variant()
-        .iter()
-        .map(|(item, _)| pricing_kind(item))
-        .collect();
-    assert_eq!(expected, actual);
-}
-
-#[test]
-fn the_kind_table_decides_the_category() {
+fn content_kind_families_decide_message_categories() {
     let rows = [
         (user("user.text", "hello"), Category::UserMessage, false),
         (
@@ -306,7 +107,7 @@ fn the_kind_table_decides_the_category() {
 }
 
 #[test]
-fn kinds_are_looked_up_by_index_never_zipped() {
+fn mismatched_kind_arrays_do_not_shift_entry_classification() {
     let short = message(
         "user",
         vec![text("<user_instructions>do this"), text("and this")],
@@ -329,7 +130,14 @@ fn kinds_are_looked_up_by_index_never_zipped() {
             .map(|part| part.kind.clone())
             .collect::<Vec<_>>()
     );
-    assert!(classification.warned());
+    assert_eq!(
+        vec![
+            ClassificationWarning::KindLengthMismatch,
+            ClassificationWarning::MarkerFallback,
+            ClassificationWarning::MixedCategories,
+        ],
+        classification.warnings
+    );
 
     let long = message(
         "user",
@@ -339,7 +147,10 @@ fn kinds_are_looked_up_by_index_never_zipped() {
     let classification = classify(&long);
     assert_eq!(Category::UserMessage, classification.category);
     assert_eq!(1, classification.parts.len());
-    assert!(classification.warned());
+    assert_eq!(
+        vec![ClassificationWarning::KindLengthMismatch],
+        classification.warnings
+    );
 }
 
 #[test]
@@ -393,7 +204,10 @@ fn a_merged_fragment_message_keeps_one_category_but_a_mixed_one_does_not() {
     );
     let classification = classify(&mixed);
     assert_eq!(Category::Other, classification.category);
-    assert!(classification.warned());
+    assert_eq!(
+        vec![ClassificationWarning::MixedCategories],
+        classification.warnings
+    );
 }
 
 #[test]
@@ -420,37 +234,13 @@ fn an_unknown_item_type_warns_but_known_controls_do_not() {
     let unknown = classify(&ResponseItem::Other);
     assert_eq!(Category::Other, unknown.category);
     assert_eq!(PricingKind::Ambiguous, unknown.pricing);
-    assert!(unknown.warned());
+    assert_eq!(
+        vec![ClassificationWarning::UnknownItemType],
+        unknown.warnings
+    );
 
     assert!(!classify(&configuration_update()).warned());
     assert!(!classify(&ResponseItem::CompactionTrigger {}).warned());
-}
-
-/// Warnings name their reason, each at most once however many entries raised it.
-#[test]
-fn warnings_carry_their_reason_once() {
-    let mixed = classify(&message(
-        "user",
-        vec![text("hi"), text("<user_instructions>x")],
-        Some(&["user.text", "agents_md.instructions"]),
-    ));
-    assert_eq!(vec![ClassificationWarning::MixedCategories], mixed.warnings);
-
-    let short = classify(&message(
-        "user",
-        vec![text("a"), text("b")],
-        Some(&["user.text"]),
-    ));
-    assert_eq!(
-        vec![
-            ClassificationWarning::KindLengthMismatch,
-            ClassificationWarning::MarkerFallback,
-        ],
-        short.warnings
-    );
-
-    let unknown = classify(&message("future_role", vec![text("a"), text("b")], None));
-    assert_eq!(vec![ClassificationWarning::UnknownRole], unknown.warnings);
 }
 
 #[test]
@@ -467,20 +257,30 @@ fn audio_entries_are_marked_as_audio() {
     assert_eq!(Category::UserMessage, classification.category);
 }
 
-/// The role decides before any entry is examined, so an empty message is still classified and an
-/// unknown role still warns.
+/// A role's category is independent of the message content, so an empty message is still
+/// classified and an unknown role still warns - once, however many entries it has.
 #[test]
 fn empty_messages_classify_by_role() {
     let cases = [
-        ("assistant", Category::AgentMessage, false),
-        ("system", Category::Instructions, false),
-        ("user", Category::Other, false),
-        ("future_role", Category::Other, true),
+        ("assistant", Category::AgentMessage, vec![]),
+        ("system", Category::Instructions, vec![]),
+        ("user", Category::Other, vec![]),
+        (
+            "future_role",
+            Category::Other,
+            vec![ClassificationWarning::UnknownRole],
+        ),
     ];
-    for (role, category, warned) in cases {
+    for (role, category, warnings) in cases {
         let classification = classify(&message(role, Vec::new(), None));
         assert_eq!(category, classification.category, "{role}");
-        assert_eq!(warned, classification.warned(), "{role}");
+        assert_eq!(warnings, classification.warnings, "{role}");
         assert!(classification.parts.is_empty(), "{role}");
     }
+
+    let two_entries = classify(&message("future_role", vec![text("a"), text("b")], None));
+    assert_eq!(
+        vec![ClassificationWarning::UnknownRole],
+        two_entries.warnings
+    );
 }

@@ -97,7 +97,7 @@ fn metadata(kinds: &[&str]) -> Option<InternalChatMessageMetadataPassthrough> {
 }
 
 /// Splits ASCII padding into `parts` chunks, remainder first; the total length is unchanged, so the
-/// item still serialises to exactly the size the capture recorded.
+/// item still serializes to exactly the size the capture recorded.
 fn split(payload: &str, parts: usize) -> Vec<String> {
     let base = payload.len() / parts;
     let remainder = payload.len() % parts;
@@ -123,7 +123,7 @@ fn sized(kind: Kind, bytes: usize) -> ResponseItem {
     let overhead = serialized_len(&kind.build(String::new()));
     assert!(
         bytes >= overhead,
-        "{kind:?} serialises to {overhead} bytes empty, so it cannot be sized to {bytes}"
+        "{kind:?} serializes to {overhead} bytes empty, so it cannot be sized to {bytes}"
     );
     let item = kind.build("x".repeat(bytes - overhead));
     assert_eq!(

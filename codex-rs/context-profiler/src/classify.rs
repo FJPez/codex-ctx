@@ -7,6 +7,7 @@
 //! non-empty kind on a user-role message is an injected instruction fragment.
 
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::APPS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
@@ -223,11 +224,14 @@ fn message_parts(
     content
         .iter()
         .enumerate()
-        .map(|(index, entry)| ContentPart {
-            kind: kinds.get(index).cloned().unwrap_or_default(),
-            bytes: serialized_size(entry).unwrap_or(0),
-            category: entry_category(role, kinds.get(index).map(String::as_str), entry, warnings),
-            media: part_media(entry),
+        .map(|(index, entry)| {
+            let kind = kinds.get(index).map(|kind| kind.0.as_str());
+            ContentPart {
+                kind: kind.unwrap_or_default().to_string(),
+                bytes: serialized_size(entry).unwrap_or(0),
+                category: entry_category(role, kind, entry, warnings),
+                media: part_media(entry),
+            }
         })
         .collect()
 }
@@ -259,20 +263,14 @@ fn role_consults_kinds(role: Role) -> bool {
     matches!(role, Role::User | Role::Developer)
 }
 
-fn content_item_kinds(item: &ResponseItem) -> Vec<String> {
-    let ResponseItem::Message {
-        internal_chat_message_metadata_passthrough: Some(metadata),
-        ..
-    } = item
-    else {
-        return Vec::new();
-    };
-    metadata
-        .content_item_kinds
-        .iter()
-        .flatten()
-        .map(|kind| kind.0.clone())
-        .collect()
+fn content_item_kinds(item: &ResponseItem) -> &[ContentItemKind] {
+    match item {
+        ResponseItem::Message {
+            internal_chat_message_metadata_passthrough: Some(metadata),
+            ..
+        } => metadata.content_item_kinds.as_deref().unwrap_or_default(),
+        _ => &[],
+    }
 }
 
 fn entry_category(

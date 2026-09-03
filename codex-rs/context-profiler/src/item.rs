@@ -54,6 +54,7 @@ pub enum ClassificationWarning {
     MixedCategories,
     /// An entry had no usable kind and was classified by its text markers.
     MarkerFallback,
+    /// A message role other than user, developer, assistant, or system; its direction is unknown.
     UnknownRole,
     /// The serde fallback variant: a response item type this build does not know.
     UnknownItemType,

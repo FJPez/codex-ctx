@@ -2,74 +2,27 @@
 
 use codex_protocol::models::ResponseItem;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ItemKind {
-    AdditionalTools,
-    Message,
-    AgentMessage,
-    Reasoning,
-    LocalShellCall,
-    FunctionCall,
-    ToolSearchCall,
-    FunctionCallOutput,
-    CustomToolCall,
-    CustomToolCallOutput,
-    ToolSearchOutput,
-    WebSearchCall,
-    ImageGenerationCall,
-    Compaction,
-    CompactionTrigger,
-    ConfigurationUpdate,
-    ContextCompaction,
-    Other,
-}
-
-impl ItemKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AdditionalTools => "AdditionalTools",
-            Self::Message => "Message",
-            Self::AgentMessage => "AgentMessage",
-            Self::Reasoning => "Reasoning",
-            Self::LocalShellCall => "LocalShellCall",
-            Self::FunctionCall => "FunctionCall",
-            Self::ToolSearchCall => "ToolSearchCall",
-            Self::FunctionCallOutput => "FunctionCallOutput",
-            Self::CustomToolCall => "CustomToolCall",
-            Self::CustomToolCallOutput => "CustomToolCallOutput",
-            Self::ToolSearchOutput => "ToolSearchOutput",
-            Self::WebSearchCall => "WebSearchCall",
-            Self::ImageGenerationCall => "ImageGenerationCall",
-            Self::Compaction => "Compaction",
-            Self::CompactionTrigger => "CompactionTrigger",
-            Self::ConfigurationUpdate => "ConfigurationUpdate",
-            Self::ContextCompaction => "ContextCompaction",
-            Self::Other => "Other",
-        }
-    }
-}
-
 /// Exhaustive so a new upstream `ResponseItem` variant fails the build.
-pub fn item_kind(item: &ResponseItem) -> ItemKind {
+pub fn item_kind(item: &ResponseItem) -> &'static str {
     match item {
-        ResponseItem::AdditionalTools { .. } => ItemKind::AdditionalTools,
-        ResponseItem::Message { .. } => ItemKind::Message,
-        ResponseItem::AgentMessage { .. } => ItemKind::AgentMessage,
-        ResponseItem::Reasoning { .. } => ItemKind::Reasoning,
-        ResponseItem::LocalShellCall { .. } => ItemKind::LocalShellCall,
-        ResponseItem::FunctionCall { .. } => ItemKind::FunctionCall,
-        ResponseItem::ToolSearchCall { .. } => ItemKind::ToolSearchCall,
-        ResponseItem::FunctionCallOutput { .. } => ItemKind::FunctionCallOutput,
-        ResponseItem::CustomToolCall { .. } => ItemKind::CustomToolCall,
-        ResponseItem::CustomToolCallOutput { .. } => ItemKind::CustomToolCallOutput,
-        ResponseItem::ToolSearchOutput { .. } => ItemKind::ToolSearchOutput,
-        ResponseItem::WebSearchCall { .. } => ItemKind::WebSearchCall,
-        ResponseItem::ImageGenerationCall { .. } => ItemKind::ImageGenerationCall,
-        ResponseItem::Compaction { .. } => ItemKind::Compaction,
-        ResponseItem::CompactionTrigger { .. } => ItemKind::CompactionTrigger,
-        ResponseItem::ConfigurationUpdate { .. } => ItemKind::ConfigurationUpdate,
-        ResponseItem::ContextCompaction { .. } => ItemKind::ContextCompaction,
-        ResponseItem::Other => ItemKind::Other,
+        ResponseItem::AdditionalTools { .. } => "AdditionalTools",
+        ResponseItem::Message { .. } => "Message",
+        ResponseItem::AgentMessage { .. } => "AgentMessage",
+        ResponseItem::Reasoning { .. } => "Reasoning",
+        ResponseItem::LocalShellCall { .. } => "LocalShellCall",
+        ResponseItem::FunctionCall { .. } => "FunctionCall",
+        ResponseItem::ToolSearchCall { .. } => "ToolSearchCall",
+        ResponseItem::FunctionCallOutput { .. } => "FunctionCallOutput",
+        ResponseItem::CustomToolCall { .. } => "CustomToolCall",
+        ResponseItem::CustomToolCallOutput { .. } => "CustomToolCallOutput",
+        ResponseItem::ToolSearchOutput { .. } => "ToolSearchOutput",
+        ResponseItem::WebSearchCall { .. } => "WebSearchCall",
+        ResponseItem::ImageGenerationCall { .. } => "ImageGenerationCall",
+        ResponseItem::Compaction { .. } => "Compaction",
+        ResponseItem::CompactionTrigger { .. } => "CompactionTrigger",
+        ResponseItem::ConfigurationUpdate { .. } => "ConfigurationUpdate",
+        ResponseItem::ContextCompaction { .. } => "ContextCompaction",
+        ResponseItem::Other => "Other",
     }
 }
 

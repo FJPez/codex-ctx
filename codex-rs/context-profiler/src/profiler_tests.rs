@@ -195,7 +195,7 @@ fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> I
         pricing: classification.pricing,
         bytes: item_bytes(item),
         cost: item_cost(item),
-        label: item_kind(item).as_str().to_string(),
+        label: item_kind(item).to_string(),
         group,
         item_id: None,
         parts: classification.parts,
