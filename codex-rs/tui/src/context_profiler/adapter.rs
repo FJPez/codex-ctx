@@ -152,13 +152,17 @@ impl ThreadProfilerAdapter {
                 }
                 None => {
                     self.last_anchor_total = None;
-                    Some(RecordedEvent {
-                        thread_id: params.thread_id.clone(),
-                        turn_id: Some(params.turn_id.clone()),
-                        kind: RecordedKind::MissingUsage {
-                            response_id: params.response_id.clone(),
+                    Some(to_record(
+                        &params.thread_id,
+                        ProfilerEvent::UsageMissing {
+                            turn_id: &params.turn_id,
                         },
-                    })
+                        self.items_seq,
+                        RecordFields {
+                            response_id: Some(params.response_id.clone()),
+                            ..RecordFields::default()
+                        },
+                    ))
                 }
             },
             ServerNotification::ThreadTokenUsageUpdated(params) => {
@@ -266,6 +270,12 @@ fn to_record(
                 status: fields.status.unwrap_or_default(),
             },
         ),
+        ProfilerEvent::UsageMissing { turn_id } => (
+            Some(turn_id.to_string()),
+            RecordedKind::MissingUsage {
+                response_id: fields.response_id.unwrap_or_default(),
+            },
+        ),
         ProfilerEvent::Invalidated { reason } => (
             fields.turn_id,
             RecordedKind::Invalidated {
@@ -286,6 +296,12 @@ fn invalidation_reason(reason: &InvalidationReason) -> String {
             format!("events_dropped(skipped={skipped})")
         }
         InvalidationReason::Compacted => "compacted".to_string(),
+        InvalidationReason::SequenceMismatch {
+            anchor_items_seen,
+            profiler_items_seen,
+        } => {
+            format!("sequence_mismatch(anchor={anchor_items_seen}, profiler={profiler_items_seen})")
+        }
     }
 }
 

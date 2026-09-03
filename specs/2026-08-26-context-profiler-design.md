@@ -241,6 +241,8 @@ pub enum ProfilerEvent<'a> {
     TurnStarted { turn_id: &'a str },
     Item        { turn_id: &'a str, item: &'a ResponseItem },
     Usage       { turn_id: &'a str, usage: UsageSnapshot },
+    /// A response completed without usage: a boundary that prices nothing.
+    UsageMissing { turn_id: &'a str },
     /// The model context window reported by `thread/tokenUsage/updated`.
     WindowUpdated { turn_id: &'a str, window: i64 },
     TurnEnded   { turn_id: &'a str, completed: bool },
@@ -253,11 +255,17 @@ pub enum InvalidationReason {
     EventsDropped { skipped: usize },
     /// A compaction item was observed. History was rewritten out from under us.
     Compacted,
+    /// An anchor's item count disagreed with the profiler's: the item stream is incomplete.
+    SequenceMismatch { anchor_items_seen: u64, profiler_items_seen: u64 },
 }
 ```
 
-This event contract is final: the six variants above are the whole input surface, and adapters
-map every stream they consume onto them.
+This event contract is final: the seven variants above are the whole input surface, and adapters
+map every stream they consume onto them. `UsageMissing` was added by the M2c review: a response
+without usage is not merely a wider span - it merges two responses, and the input/output class
+split assumes exactly one response per span. Without the boundary event, response A's outputs
+would be priced from response B's `output_tokens` and B's input delta would land entirely on the
+tool output, labelled `Exact`.
 
 **`WindowUpdated` is a separate event because the window is not a property of an anchor.** The
 model context window is not constant for a session - `/model` switches the model mid-session - so
@@ -372,7 +380,9 @@ adapter emits the two independently - `Usage` from `rawResponse/completed`, `Win
 That also keeps the window correct across a mid-session `/model` switch.
 
 `RawResponseCompletedNotification.usage` is `Option<…>`. When it is `None` — cancelled or failed
-attempts — **emit no anchor** and increment `missing_usage_count` in diagnostics. An anchor with a
+attempts — **emit no anchor**; the adapter records a `MissingUsage` trace entry and emits
+`ProfilerEvent::UsageMissing`, which the profiler treats as an unpriced response boundary (see
+"The implemented contract"). An anchor with a
 guessed value would corrupt every subsequent residual. Covered by a Spike D test.
 
 The fallback path is narrow: if raw events are off there are no items either, so `/ctx` is in its
@@ -486,11 +496,21 @@ pub enum GroupKey {
     Ungrouped(u64),     // seq: the item is its own group
 }
 
+/// A whole measured total on one item is `Exact`; a proportional share of a
+/// measured total is `Estimated` (the aggregate is measured, the split ratio is
+/// a guess), as is a byte proxy. Apportioned shares still SUM to a measured
+/// figure, so a fully-apportioned span contributes zero drift.
+pub enum TokenCost {
+    Exact(i64),
+    Estimated(i64),
+}
+
 pub struct ItemSummary {
     pub seq: u64,
     pub turn_index: u32,
     pub category: Category,
-    pub estimated_tokens: i64,
+    pub bytes: usize,
+    pub cost: TokenCost,
     pub label: String,          // capped
     pub group: GroupKey,
     pub item_id: Option<String>,
@@ -502,7 +522,7 @@ pub struct ItemSummary {
 pub struct ItemGroup {
     pub key: GroupKey,
     pub category: Category,     // the group's dominant category
-    pub estimated_tokens: i64,  // sum across members
+    pub cost: TokenCost,        // sum across members; Exact only when all members are
     pub label: String,
     pub members: Vec<u64>,      // ItemSummary::seq values
 }
@@ -572,7 +592,8 @@ pub struct ContextSnapshot {
     pub window: Option<i64>,
     pub reported_context_tokens: Option<i64>,
     pub initial_context: Option<InitialContextSummary>,
-    pub by_category: Vec<(Category, i64)>,
+    pub items: Vec<ItemSummary>,         // the mirror itself, in observation order
+    pub by_category: Vec<(Category, TokenCost)>,
     pub baseline_tokens: Option<i64>,
     pub drift_tokens: i64,
     pub groups: Vec<ItemGroup>,          // complete list; the view caps it
@@ -613,8 +634,6 @@ pub struct ProfilerState {
     pub invalidated: Option<InvalidationReason>,
     /// Surfaced in `/ctx`: classification gaps we know about.
     pub unrecognized_fragment_count: u32,
-    /// Anchors we could not record because usage was absent.
-    pub missing_usage_count: u32,
     /// Reconciliation input, not diagnostics.
     pub anchors: Vec<UsageSnapshot>,
 }
@@ -712,6 +731,68 @@ more controllable than fighting the config, and the `<-- MULTI` flag in
   accumulator must not treat a negative delta as a bug (findings §10.4).
 - **Interrupted turns strand items past the last anchor.** Those items have no measured cost and can
   only be estimated (findings §10.1).
+
+### The implemented contract
+
+Every item is one of two structural classes, decided by its `ResponseItem` variant:
+
+| class | items | priced by |
+|---|---|---|
+| **input-kind** | tool outputs, user messages | the anchor **delta**, because they are serialised into the *next* request |
+| **output-kind** | reasoning, agent messages, tool calls | that response's own `output_tokens` |
+
+Compaction and `Other` items are neither and stay on the byte proxy.
+
+At each anchor, the **span** is the items observed since that turn's previous anchor, or since the
+turn started if this is its first anchor.
+
+1. **Output-kind pricing works at every anchor, including the first.** `output_tokens` is an
+   absolute, not a difference, so it needs only the one anchor.
+2. **Input-kind pricing needs a pair of anchors in the same turn.**
+   `delta = input_tokens(n+1) − total_tokens(n)`. The same-turn requirement is what excludes the
+   cross-turn shrink of §10.4 structurally, rather than by a special case.
+3. **A negative delta attributes nothing.** The span's input-kind items keep the byte proxy.
+4. **Stranding is permanent.** When a turn ends, items not yet priced stay on the proxy forever and
+   the pending span is cleared. Mid-turn items price normally at the next same-turn anchor.
+5. **An unmatched total goes unattributed.** A positive delta over a span with no input-kind items
+   is not invented onto other items; it lands in the reconciliation drift. Same for `output_tokens`
+   over a span with no output-kind items.
+6. **Missing usage is an unpriced boundary.** `UsageMissing` advances the span start to the
+   current item count and clears the turn's previous anchor and the global last anchor, without
+   touching the turn's `measured_before`. Items before the boundary stay estimated; the next
+   response's outputs are still priced from its own `output_tokens`; no input delta is computed
+   across the gap. If it was the turn's final response, both `measured_after` and the next turn's
+   `measured_before` are `None`.
+7. **An incomplete turn clears the global anchor.** The next turn starts with
+   `measured_before: None`, so every `measured_added() == Some(..)` is bounded by trustworthy
+   anchors around that one turn - never a stale anchor inside an earlier turn's unmeasured tail.
+   The ordinary cross-turn shrink (findings 10.4) is still inside the figure; that is a real
+   boundary-to-boundary change, not an inherited unmeasured tail.
+8. **A sequence mismatch invalidates immediately.** If an anchor's `items_seq` disagrees with the
+   profiler's own count, the item stream is incomplete and no later anchor can reconstruct which
+   tokens belonged to the missing item. The anchor is neither pushed nor applied;
+   `InvalidationReason::SequenceMismatch` carries both counts. Recovery rules belong to M5's
+   epochs.
+
+Verified against the §6.2 capture: anchor A reports total 25,422; a `CustomToolCallOutput` and then
+a `Reasoning` item arrive; anchor B reports `input_tokens` 29,137. The delta of **3,715** prices the
+tool output alone - the reasoning item is not input to B, it is inside B's own `output_tokens` of 93.
+
+**Apportionment.** When a span holds several items of one class, the measured total is split by
+serialised byte weight using a cumulative floor:
+
+```
+share_i = floor(total × cumulative_weight_i / total_weight) − already_assigned
+```
+
+The final cumulative floor is exactly `total`, so the shares sum to the total by construction and
+the rounding remainder falls on later entries rather than being lost. Iteration is in `seq` order,
+so ties break deterministically. Items with no bytes at all split evenly, remainder to the earliest
+`seq`s. A non-positive total yields all zeros.
+
+**Exactness follows from wholeness, not from provenance.** An item that receives a whole measured
+total is `Exact`; any apportioned share is `Estimated`, and a group is `Exact` only when every
+member is.
 
 ## Reconciliation
 
@@ -866,10 +947,12 @@ used a percentage threshold with no absolute floor (an `86% TRUNCATED` verdict o
 Neither was caught by a test - both were visible only because a number looked implausible.
 
 The accumulator does exactly this class of work: ordering by `seq`, pairing calls with outputs,
-aligning anchors with the items preceding them. So there must be a test whose input is
-**deliberately shuffled relative to arrival order**, asserting the fold still produces the correct
-result. Without it the same bug reappears somewhere it yields plausible numbers rather than an
-obvious `-787%`. Findings §10.5. Then: residual establishment at the first anchor, drift updates at later anchors
+aligning anchors with the items preceding them. So there must be a test that proves internal
+iteration order never leaks into results. The first draft asked for a literally shuffled input;
+M2c translated that into the determinism suite described under Fixtures, because arrival order
+*is* the fold's semantics and a shuffled input describes a different stream. Without it the same
+bug reappears somewhere it yields plausible numbers rather than an obvious `-787%`. Findings
+§10.5. Then: residual establishment at the first anchor, drift updates at later anchors
 (named so they do not imply the baseline is permanently fixed), epoch sealing, `call_id` grouping,
 `Resume` epochs, out-of-turn items, anomaly counters.
 
@@ -919,6 +1002,23 @@ States: normal, raw-events-unavailable, invalidated (dropped events), invalidate
 large residual, empty/new session, and one huge contributor with a long label (layout stress).
 
 ### Fixtures
+
+**M2c - what shipped.** `context-profiler/src/fixture_tests.rs` transcribes captures into Rust
+rather than committing them: a builder pads each item's string payload until
+`serde_json::to_vec(&item).len()` equals the capture's recorded byte count and asserts that
+equality itself, so byte weights - which drive apportionment - are reproduced, not approximated.
+Three replays sit on top of it: the §9.2 ladder, asserted as `Exact(1040)`, `Exact(3373)`,
+`Exact(2219)` and `Exact(5043)` to the token; the full 73-record live trace (42 items, 13 anchors,
+zero seq mismatches, the -205 cross-turn boundary of §10.4 and the 41,448-byte read priced at
+8,942); and the interrupted turn of §10.1. Captures record no message role, so a turn's opening
+message is taken as the user's.
+
+In place of §10.5's literal shuffled-input test, M2c ships a determinism suite. Arrival order *is*
+the fold's semantics - reordering the input changes which span an item falls in, so a shuffled
+stream has no correct answer to assert against. The bug §10.5 actually describes is a container's
+iteration order leaking into output, so the suite pins the outputs instead: two folds of the same
+event vector serialise byte-identically, `snapshot.items` is in ascending `seq`, groups are in
+first-member `seq` order, and `by_category` is in `Category` declaration order.
 
 Two kinds, deliberately independent so the oracle test is not circular:
 
@@ -995,13 +1095,14 @@ branch. Each stage compiles and passes `just test -p codex-context-profiler` at 
 | Stage | Branch | Scope (~lines) | Exit criterion |
 |---|---|---|---|
 | M2a | `context-profiler-crate` | Crate skeleton, `BUILD.bazel` + lock update, `ProfilerEvent` and all model types, no logic (~350) | Workspace builds; `just bazel-lock-check` passes |
-| M2b | `profiler-live-adapter` | Scoped `experimental_raw_events`, notification→event, usage buffering, `Lagged` broadcast, `ProfilerRegistry` on `App`, JSONL writer (~500) | A live session's adapter JSONL matches the M1 probe log |
-| M2c | `profiler-accumulator` | Fold, grouping, turn deltas, anchor-delta attribution incl. multi-item apportioning (~500) | Fed the M1 captures, reproduces `analyse_capture.py`'s measured deltas (1,040 / 3,373 / 2,219 / 5,043); handles the interrupted turn's stranded items and the −192 boundary; **shuffled-input test passes** (findings §10.5) |
+| M2b | `profiler-live-adapter` | Scoped `experimental_raw_events`, notification→event (no usage buffering: `WindowUpdated` is its own event), `Lagged` broadcast, `ProfilerRegistry` on `App`, JSONL writer (~500) | A live session's adapter JSONL matches the M1 probe log |
+| M2c | `profiler-accumulator` | Fold, grouping, turn deltas, anchor-delta attribution incl. multi-item apportioning (~500) | Fed the M1 captures, reproduces `analyse_capture.py`'s measured deltas (1,040 / 3,373 / 2,219 / 5,043); handles the interrupted turn's stranded items and the −192 boundary; **determinism suite passes** (findings §10.5, translated - see Fixtures) |
 | M2d | `profiler-classification` | Classification + unrecognised-fragment counter, estimator with `Reasoning` special-case, scrubber + committed fixtures (~400) | Category totals over the captures are sane; fixtures pass `assert_no_home_paths` |
 
 Ordering is dependency order, and deliberately puts the two exact, provable layers (adapter,
 accumulator) before the fuzzy one (classification, estimation) - a wrong number in M2d is then
-M2d's fault, not something beneath it. M2b is the only stage touching `codex-tui`.
+M2d's fault, not something beneath it. M2b is the stage that wires `codex-tui`; later stages touch
+the adapter only when the event contract changes (M2c added `UsageMissing`).
 
 ### M1, re-scoped
 
@@ -1081,6 +1182,12 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
    token usage record to the rollout. If it anchors the way `EventMsg::TokenCount` does, M7
    hydration may get measured per-item costs for the replayed prefix too, not just the live
    suffix. Assess when M7 starts.
+5. **Unsizable items are silently zero** (M2d). Both the adapter and the profiler size an item
+   with `serde_json::to_vec(item).map(len).unwrap_or(0)`. Serialization of `ResponseItem` cannot
+   fail for today's types, and a panic in a diagnostic layer must never take the session down,
+   but a zero-byte item would take a zero share in apportioning - a quiet under-count. When M2d
+   adds classification diagnostics, size items through one shared helper and count failures next
+   to `unrecognized_fragment_count` so `/ctx` can say "n items could not be sized".
 
 ### Resolved since the first draft
 

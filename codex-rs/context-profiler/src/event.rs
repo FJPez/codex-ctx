@@ -18,6 +18,10 @@ pub enum ProfilerEvent<'a> {
         turn_id: &'a str,
         usage: UsageSnapshot,
     },
+    /// A response completed without usage: a boundary that prices nothing.
+    UsageMissing {
+        turn_id: &'a str,
+    },
     /// The model context window reported by `thread/tokenUsage/updated`.
     WindowUpdated {
         turn_id: &'a str,
@@ -40,4 +44,9 @@ pub enum InvalidationReason {
         skipped: usize,
     },
     Compacted,
+    /// An anchor's item count disagreed with the profiler's, so the item stream is incomplete.
+    SequenceMismatch {
+        anchor_items_seen: u64,
+        profiler_items_seen: u64,
+    },
 }

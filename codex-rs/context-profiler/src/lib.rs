@@ -5,6 +5,7 @@
 
 mod event;
 mod item;
+mod profiler;
 mod snapshot;
 mod usage;
 
@@ -14,7 +15,8 @@ pub use item::Category;
 pub use item::GroupKey;
 pub use item::ItemGroup;
 pub use item::ItemSummary;
-pub use snapshot::ContextProfiler;
+pub use item::TokenCost;
+pub use profiler::ContextProfiler;
 pub use snapshot::ContextSnapshot;
 pub use snapshot::InitialContextSummary;
 pub use snapshot::ProfilerState;
