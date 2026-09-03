@@ -579,10 +579,14 @@ silently. Non-message variants keep the structural mapping, and `ConfigurationUp
 single part of kind `configuration_update`.
 
 An item's category is its parts' category when they agree, and `Other` with a warning when they
-genuinely disagree. `warned` is one flag per item however many uncertainties it held, so
-`classification_warning_count` counts items, not entries. Parts carry **bytes, not tokens**: a
-breakdown fine enough to explain a merged fragment, without pretending the estimator can split a
-measured total below item granularity.
+genuinely disagree. Each item carries its reasons as `warnings: Vec<ClassificationWarning>` -
+`KindLengthMismatch`, `MixedCategories`, `MarkerFallback`, `UnknownRole`, `UnknownItemType` - each
+at most once, so `classification_warning_count` counts items with any warning, not entries, and
+`/ctx` can say why. Parts carry **bytes, not tokens**: a breakdown fine enough to explain a
+merged fragment, without pretending the estimator can split a measured total below item
+granularity. Each part also records its `PartMedia` (`Text`, `Image`, `Audio`): images take the
+flat estimate, and audio takes the byte fallback core itself uses when it cannot decode a clip
+(the profiler never decodes, so duration-based audio pricing is deferred).
 
 **Pricing is independent of the display category.** `PricingKind` is derived from the item variant
 and the message role alone: `Input` for user/developer messages and tool outputs, `Output` for

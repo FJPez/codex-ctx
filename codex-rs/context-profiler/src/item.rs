@@ -27,6 +27,14 @@ pub enum PricingKind {
     Ambiguous,
 }
 
+/// What a content entry holds, which decides how its bytes are estimated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PartMedia {
+    Text,
+    Image,
+    Audio,
+}
+
 /// One entry of a message's content array, classified on its own.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContentPart {
@@ -34,8 +42,21 @@ pub struct ContentPart {
     pub kind: String,
     pub bytes: usize,
     pub category: Category,
-    /// Priced at a flat per-image cost rather than from its bytes.
-    pub is_image: bool,
+    pub media: PartMedia,
+}
+
+/// Why an item's classification is uncertain; an item carries each reason at most once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ClassificationWarning {
+    /// `content_item_kinds` and `content` differ in length.
+    KindLengthMismatch,
+    /// The entries of one message classify differently.
+    MixedCategories,
+    /// An entry had no usable kind and was classified by its text markers.
+    MarkerFallback,
+    UnknownRole,
+    /// The serde fallback variant: a response item type this build does not know.
+    UnknownItemType,
 }
 
 /// A whole measured total on one item is `Exact`; a proportional share of a measured total is
@@ -84,6 +105,7 @@ pub struct ItemSummary {
     pub item_id: Option<String>,
     /// Per-content-entry breakdown, in bytes; empty for items without a content array.
     pub parts: Vec<ContentPart>,
+    pub warnings: Vec<ClassificationWarning>,
 }
 
 /// The display unit for "largest contributors": typically a tool call with its output.

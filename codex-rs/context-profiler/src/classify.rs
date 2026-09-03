@@ -23,7 +23,9 @@ use codex_protocol::protocol::USER_INSTRUCTIONS_OPEN_TAG;
 
 use crate::estimate::serialized_size;
 use crate::item::Category;
+use crate::item::ClassificationWarning;
 use crate::item::ContentPart;
+use crate::item::PartMedia;
 use crate::item::PricingKind;
 
 /// The kind core stamps when it has no classification for an entry.
@@ -53,25 +55,38 @@ pub(crate) struct Classification {
     pub category: Category,
     pub pricing: PricingKind,
     pub parts: Vec<ContentPart>,
-    /// One flag per item however many uncertainties it held, so warnings count items.
-    pub warned: bool,
+    /// Each reason at most once, so the count of warned items is `!warnings.is_empty()`.
+    pub warnings: Vec<ClassificationWarning>,
+}
+
+impl Classification {
+    pub(crate) fn warned(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+}
+
+/// Records a reason once however many entries raised it.
+fn note(warnings: &mut Vec<ClassificationWarning>, warning: ClassificationWarning) {
+    if !warnings.contains(&warning) {
+        warnings.push(warning);
+    }
 }
 
 pub(crate) fn classify(item: &ResponseItem) -> Classification {
     let pricing = pricing_kind(item);
     match item {
         ResponseItem::Message { role, content, .. } => {
-            let mut warned = false;
-            let parts = message_parts(item, role, content, &mut warned);
-            let category = match role_category(role, &mut warned) {
+            let mut warnings = Vec::new();
+            let parts = message_parts(item, role, content, &mut warnings);
+            let category = match role_category(role, &mut warnings) {
                 Some(category) => category,
-                None => merge_categories(&parts, &mut warned),
+                None => merge_categories(&parts, &mut warnings),
             };
             Classification {
                 category,
                 pricing,
                 parts,
-                warned,
+                warnings,
             }
         }
         ResponseItem::ConfigurationUpdate { .. } => Classification {
@@ -81,9 +96,9 @@ pub(crate) fn classify(item: &ResponseItem) -> Classification {
                 kind: "configuration_update".to_string(),
                 bytes: serialized_size(item).unwrap_or(0),
                 category: Category::Other,
-                is_image: false,
+                media: PartMedia::Text,
             }],
-            warned: false,
+            warnings: Vec::new(),
         },
         ResponseItem::AdditionalTools { .. }
         | ResponseItem::AgentMessage { .. }
@@ -103,14 +118,14 @@ pub(crate) fn classify(item: &ResponseItem) -> Classification {
             category: structural_category(item),
             pricing,
             parts: Vec::new(),
-            warned: false,
+            warnings: Vec::new(),
         },
         // The serde fallback: an item type this build does not know, so its arrival is the signal.
         ResponseItem::Other => Classification {
             category: Category::Other,
             pricing,
             parts: Vec::new(),
-            warned: true,
+            warnings: vec![ClassificationWarning::UnknownItemType],
         },
     }
 }
@@ -174,11 +189,11 @@ fn message_parts(
     item: &ResponseItem,
     role: &str,
     content: &[ContentItem],
-    warned: &mut bool,
+    warnings: &mut Vec<ClassificationWarning>,
 ) -> Vec<ContentPart> {
     let kinds = content_item_kinds(item);
     if role_consults_kinds(role) && kinds.len() != content.len() {
-        *warned = true;
+        note(warnings, ClassificationWarning::KindLengthMismatch);
     }
     content
         .iter()
@@ -186,21 +201,29 @@ fn message_parts(
         .map(|(index, entry)| ContentPart {
             kind: kinds.get(index).cloned().unwrap_or_default(),
             bytes: serialized_size(entry).unwrap_or(0),
-            category: entry_category(role, kinds.get(index).map(String::as_str), entry, warned),
-            is_image: matches!(entry, ContentItem::InputImage { .. }),
+            category: entry_category(role, kinds.get(index).map(String::as_str), entry, warnings),
+            media: part_media(entry),
         })
         .collect()
 }
 
+fn part_media(entry: &ContentItem) -> PartMedia {
+    match entry {
+        ContentItem::InputText { .. } | ContentItem::OutputText { .. } => PartMedia::Text,
+        ContentItem::InputImage { .. } => PartMedia::Image,
+        ContentItem::InputAudio { .. } => PartMedia::Audio,
+    }
+}
+
 /// Roles whose category does not depend on their entries, decided before any entry is examined so
 /// an empty message is classified and an unknown role is warned about regardless of content.
-fn role_category(role: &str, warned: &mut bool) -> Option<Category> {
+fn role_category(role: &str, warnings: &mut Vec<ClassificationWarning>) -> Option<Category> {
     match role {
         "assistant" => Some(Category::AgentMessage),
         "system" => Some(Category::Instructions),
         "user" | "developer" => None,
         _ => {
-            *warned = true;
+            note(warnings, ClassificationWarning::UnknownRole);
             Some(Category::Other)
         }
     }
@@ -231,7 +254,7 @@ fn entry_category(
     role: &str,
     kind: Option<&str>,
     entry: &ContentItem,
-    warned: &mut bool,
+    warnings: &mut Vec<ClassificationWarning>,
 ) -> Category {
     match role {
         "assistant" => Category::AgentMessage,
@@ -241,12 +264,12 @@ fn entry_category(
             Some(COMPACTION_SUMMARY_KIND) => Category::Compaction,
             Some(kind) if !kind.is_empty() && kind != UNKNOWN_KIND => Category::Instructions,
             _ => {
-                *warned = true;
+                note(warnings, ClassificationWarning::MarkerFallback);
                 tagged_fallback(entry)
             }
         },
         _ => {
-            *warned = true;
+            note(warnings, ClassificationWarning::UnknownRole);
             Category::Other
         }
     }
@@ -272,14 +295,14 @@ fn tagged_fallback(entry: &ContentItem) -> Category {
 
 /// A merged message keeps its category only while its entries agree; a genuinely mixed one is not
 /// representable in a single row, so it lands in `Other` and says so.
-fn merge_categories(parts: &[ContentPart], warned: &mut bool) -> Category {
+fn merge_categories(parts: &[ContentPart], warnings: &mut Vec<ClassificationWarning>) -> Category {
     let Some(first) = parts.first() else {
         return Category::Other;
     };
     if parts.iter().all(|part| part.category == first.category) {
         return first.category;
     }
-    *warned = true;
+    note(warnings, ClassificationWarning::MixedCategories);
     Category::Other
 }
 

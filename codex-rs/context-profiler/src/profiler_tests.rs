@@ -199,6 +199,7 @@ fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> I
         group,
         item_id: None,
         parts: classification.parts,
+        warnings: classification.warnings,
     }
 }
 

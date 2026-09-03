@@ -299,7 +299,7 @@ fn the_kind_table_decides_the_category() {
         .iter()
         .map(|(item, _, _)| {
             let classification = classify(item);
-            (classification.category, classification.warned)
+            (classification.category, classification.warned())
         })
         .collect();
     assert_eq!(expected, actual);
@@ -329,7 +329,7 @@ fn kinds_are_looked_up_by_index_never_zipped() {
             .map(|part| part.kind.clone())
             .collect::<Vec<_>>()
     );
-    assert!(classification.warned);
+    assert!(classification.warned());
 
     let long = message(
         "user",
@@ -339,7 +339,7 @@ fn kinds_are_looked_up_by_index_never_zipped() {
     let classification = classify(&long);
     assert_eq!(Category::UserMessage, classification.category);
     assert_eq!(1, classification.parts.len());
-    assert!(classification.warned);
+    assert!(classification.warned());
 }
 
 #[test]
@@ -355,11 +355,11 @@ fn an_untagged_message_falls_back_to_the_open_tag_marker() {
     let plain = classify(&plain);
     assert_eq!(
         (Category::Instructions, true),
-        (tagged.category, tagged.warned)
+        (tagged.category, tagged.warned())
     );
     assert_eq!(
         (Category::UserMessage, true),
-        (plain.category, plain.warned)
+        (plain.category, plain.warned())
     );
 }
 
@@ -373,7 +373,7 @@ fn a_merged_fragment_message_keeps_one_category_but_a_mixed_one_does_not() {
     );
     let classification = classify(&merged);
     assert_eq!(Category::Instructions, classification.category);
-    assert!(!classification.warned);
+    assert!(!classification.warned());
     assert_eq!(
         entries
             .iter()
@@ -393,7 +393,7 @@ fn a_merged_fragment_message_keeps_one_category_but_a_mixed_one_does_not() {
     );
     let classification = classify(&mixed);
     assert_eq!(Category::Other, classification.category);
-    assert!(classification.warned);
+    assert!(classification.warned());
 }
 
 #[test]
@@ -408,7 +408,7 @@ fn a_configuration_update_is_one_ambiguous_part() {
             kind: "configuration_update".to_string(),
             bytes: serde_json::to_vec(&item).expect("serializable item").len(),
             category: Category::Other,
-            is_image: false,
+            media: PartMedia::Text,
         }],
         classification.parts
     );
@@ -420,10 +420,51 @@ fn an_unknown_item_type_warns_but_known_controls_do_not() {
     let unknown = classify(&ResponseItem::Other);
     assert_eq!(Category::Other, unknown.category);
     assert_eq!(PricingKind::Ambiguous, unknown.pricing);
-    assert!(unknown.warned);
+    assert!(unknown.warned());
 
-    assert!(!classify(&configuration_update()).warned);
-    assert!(!classify(&ResponseItem::CompactionTrigger {}).warned);
+    assert!(!classify(&configuration_update()).warned());
+    assert!(!classify(&ResponseItem::CompactionTrigger {}).warned());
+}
+
+/// Warnings name their reason, each at most once however many entries raised it.
+#[test]
+fn warnings_carry_their_reason_once() {
+    let mixed = classify(&message(
+        "user",
+        vec![text("hi"), text("<user_instructions>x")],
+        Some(&["user.text", "agents_md.instructions"]),
+    ));
+    assert_eq!(vec![ClassificationWarning::MixedCategories], mixed.warnings);
+
+    let short = classify(&message(
+        "user",
+        vec![text("a"), text("b")],
+        Some(&["user.text"]),
+    ));
+    assert_eq!(
+        vec![
+            ClassificationWarning::KindLengthMismatch,
+            ClassificationWarning::MarkerFallback,
+        ],
+        short.warnings
+    );
+
+    let unknown = classify(&message("future_role", vec![text("a"), text("b")], None));
+    assert_eq!(vec![ClassificationWarning::UnknownRole], unknown.warnings);
+}
+
+#[test]
+fn audio_entries_are_marked_as_audio() {
+    let item = message(
+        "user",
+        vec![ContentItem::InputAudio {
+            audio_url: "data:audio/wav;base64,AAAA".to_string(),
+        }],
+        Some(&["user.audio"]),
+    );
+    let classification = classify(&item);
+    assert_eq!(PartMedia::Audio, classification.parts[0].media);
+    assert_eq!(Category::UserMessage, classification.category);
 }
 
 /// The role decides before any entry is examined, so an empty message is still classified and an
@@ -439,7 +480,7 @@ fn empty_messages_classify_by_role() {
     for (role, category, warned) in cases {
         let classification = classify(&message(role, Vec::new(), None));
         assert_eq!(category, classification.category, "{role}");
-        assert_eq!(warned, classification.warned, "{role}");
+        assert_eq!(warned, classification.warned(), "{role}");
         assert!(classification.parts.is_empty(), "{role}");
     }
 }

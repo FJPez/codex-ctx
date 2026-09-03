@@ -86,7 +86,7 @@ impl ContextProfiler {
                     None => GroupKey::Ungrouped(seq),
                 };
                 let classification = classify(item);
-                if classification.warned {
+                if classification.warned() {
                     self.state.classification_warning_count += 1;
                 }
                 let estimate = size.map_or(0, |bytes| {
@@ -103,6 +103,7 @@ impl ContextProfiler {
                     group,
                     item_id: item.id().map(ToString::to_string),
                     parts: classification.parts,
+                    warnings: classification.warnings,
                 });
                 self.rebuild_aggregates();
             }

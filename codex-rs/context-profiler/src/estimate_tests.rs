@@ -71,8 +71,8 @@ fn an_image_entry_takes_the_flat_estimate_and_its_siblings_do_not() {
     let bytes = serde_json::to_vec(&item).expect("serializable item").len();
     let parts = &classification.parts;
     assert_eq!(
-        vec![true, false],
-        parts.iter().map(|part| part.is_image).collect::<Vec<_>>()
+        vec![PartMedia::Image, PartMedia::Text],
+        parts.iter().map(|part| part.media).collect::<Vec<_>>()
     );
     assert_eq!(
         IMAGE_TOKENS + text_tokens(parts[1].bytes),

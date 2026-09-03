@@ -16,6 +16,7 @@
 
 use crate::item::Category;
 use crate::item::ContentPart;
+use crate::item::PartMedia;
 
 /// Serialized size of a value, or `None` if it cannot be serialized.
 pub fn serialized_size<T: serde::Serialize>(value: &T) -> Option<usize> {
@@ -59,12 +60,11 @@ pub(crate) fn item_tokens(category: Category, parts: &[ContentPart], bytes: usiz
     }
     parts
         .iter()
-        .map(|part| {
-            if part.is_image {
-                IMAGE_TOKENS
-            } else {
-                text_tokens(part.bytes)
-            }
+        .map(|part| match part.media {
+            PartMedia::Image => IMAGE_TOKENS,
+            // Core prices audio by decoded duration and falls back to a byte count when it cannot
+            // decode; the profiler never decodes, so it always takes that fallback.
+            PartMedia::Text | PartMedia::Audio => text_tokens(part.bytes),
         })
         .sum()
 }
