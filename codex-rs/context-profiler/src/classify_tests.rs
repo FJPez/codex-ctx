@@ -414,6 +414,18 @@ fn a_configuration_update_is_one_ambiguous_part() {
     );
 }
 
+/// An item type this build cannot name is worth a warning; known control items are not.
+#[test]
+fn an_unknown_item_type_warns_but_known_controls_do_not() {
+    let unknown = classify(&ResponseItem::Other);
+    assert_eq!(Category::Other, unknown.category);
+    assert_eq!(PricingKind::Ambiguous, unknown.pricing);
+    assert!(unknown.warned);
+
+    assert!(!classify(&configuration_update()).warned);
+    assert!(!classify(&ResponseItem::CompactionTrigger {}).warned);
+}
+
 /// The role decides before any entry is examined, so an empty message is still classified and an
 /// unknown role still warns.
 #[test]

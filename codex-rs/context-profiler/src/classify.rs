@@ -99,12 +99,18 @@ pub(crate) fn classify(item: &ResponseItem) -> Classification {
         | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::ContextCompaction { .. }
-        | ResponseItem::Other => Classification {
+        | ResponseItem::ContextCompaction { .. } => Classification {
             category: structural_category(item),
             pricing,
             parts: Vec::new(),
             warned: false,
+        },
+        // The serde fallback: an item type this build does not know, so its arrival is the signal.
+        ResponseItem::Other => Classification {
+            category: Category::Other,
+            pricing,
+            parts: Vec::new(),
+            warned: true,
         },
     }
 }

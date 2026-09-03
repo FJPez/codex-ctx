@@ -939,6 +939,20 @@ fn an_ambiguous_item_leaves_its_span_estimated_and_the_next_span_recovers() {
     assert_eq!(3, state.anchors.len());
 }
 
+/// The serde fallback item is the one shape whose arrival is itself the finding.
+#[test]
+fn an_unknown_item_type_is_counted_once() {
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(&mut profiler, TURN, &[&ResponseItem::Other]);
+
+    let state = profiler.state();
+    assert_eq!(1, state.classification_warning_count);
+    assert_eq!(Category::Other, state.snapshot.items[0].category);
+    assert_eq!(PricingKind::Ambiguous, state.snapshot.items[0].pricing);
+    assert_eq!(None, state.invalidated);
+}
+
 /// An unknown role is both a display warning and a pricing ambiguity, and neither invalidates.
 #[test]
 fn an_unknown_role_message_poisons_only_its_own_span() {
