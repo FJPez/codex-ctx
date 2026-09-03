@@ -372,7 +372,9 @@ adapter emits the two independently - `Usage` from `rawResponse/completed`, `Win
 That also keeps the window correct across a mid-session `/model` switch.
 
 `RawResponseCompletedNotification.usage` is `Option<…>`. When it is `None` — cancelled or failed
-attempts — **emit no anchor** and increment `missing_usage_count` in diagnostics. An anchor with a
+attempts — **emit no anchor**; the trace records a `MissingUsage` entry (an acquisition
+diagnostic, owned by the adapter, not profiler analytics - the profiler simply sees a wider
+anchor span, which apportioning handles). An anchor with a
 guessed value would corrupt every subsequent residual. Covered by a Spike D test.
 
 The fallback path is narrow: if raw events are off there are no items either, so `/ctx` is in its
@@ -486,11 +488,21 @@ pub enum GroupKey {
     Ungrouped(u64),     // seq: the item is its own group
 }
 
+/// A whole measured total on one item is `Exact`; a proportional share of a
+/// measured total is `Estimated` (the aggregate is measured, the split ratio is
+/// a guess), as is a byte proxy. Apportioned shares still SUM to a measured
+/// figure, so a fully-apportioned span contributes zero drift.
+pub enum TokenCost {
+    Exact(i64),
+    Estimated(i64),
+}
+
 pub struct ItemSummary {
     pub seq: u64,
     pub turn_index: u32,
     pub category: Category,
-    pub estimated_tokens: i64,
+    pub bytes: usize,
+    pub cost: TokenCost,
     pub label: String,          // capped
     pub group: GroupKey,
     pub item_id: Option<String>,
@@ -502,7 +514,7 @@ pub struct ItemSummary {
 pub struct ItemGroup {
     pub key: GroupKey,
     pub category: Category,     // the group's dominant category
-    pub estimated_tokens: i64,  // sum across members
+    pub cost: TokenCost,        // sum across members; Exact only when all members are
     pub label: String,
     pub members: Vec<u64>,      // ItemSummary::seq values
 }
@@ -572,7 +584,8 @@ pub struct ContextSnapshot {
     pub window: Option<i64>,
     pub reported_context_tokens: Option<i64>,
     pub initial_context: Option<InitialContextSummary>,
-    pub by_category: Vec<(Category, i64)>,
+    pub items: Vec<ItemSummary>,         // the mirror itself, in observation order
+    pub by_category: Vec<(Category, TokenCost)>,
     pub baseline_tokens: Option<i64>,
     pub drift_tokens: i64,
     pub groups: Vec<ItemGroup>,          // complete list; the view caps it
@@ -613,8 +626,8 @@ pub struct ProfilerState {
     pub invalidated: Option<InvalidationReason>,
     /// Surfaced in `/ctx`: classification gaps we know about.
     pub unrecognized_fragment_count: u32,
-    /// Anchors we could not record because usage was absent.
-    pub missing_usage_count: u32,
+    /// The adapter and profiler disagreed about the stream (items_seq cross-check).
+    pub seq_mismatch_count: u32,
     /// Reconciliation input, not diagnostics.
     pub anchors: Vec<UsageSnapshot>,
 }
