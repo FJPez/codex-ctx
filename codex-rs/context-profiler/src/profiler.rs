@@ -4,6 +4,7 @@
 //! shown; it is never the number of items the server holds, nor the size of its context.
 
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 
 use codex_protocol::models::ResponseItem;
 
@@ -15,6 +16,7 @@ use crate::item::ItemSummary;
 use crate::item::TokenCost;
 use crate::snapshot::ProfilerState;
 use crate::snapshot::TurnDelta;
+use crate::usage::UsageSnapshot;
 
 /// How a turn stopped, since only a completed turn has a trustworthy closing anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +33,8 @@ struct OpenTurn {
     first_seq: u64,
     measured_before: Option<i64>,
     last_anchor: Option<i64>,
+    /// `items_seen` when this turn's last anchor arrived; the start of the next attribution span.
+    last_anchor_seq: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -91,10 +95,13 @@ impl ContextProfiler {
                     self.state.seq_mismatch_count += 1;
                 }
                 let total = usage.reported_context_tokens;
+                self.attribute_span(&usage);
                 self.state.snapshot.reported_context_tokens = Some(total);
                 self.last_anchor_total = Some(total);
+                let items_seen = self.items_seen;
                 if let Some(turn) = self.open_turn.as_mut() {
                     turn.last_anchor = Some(total);
+                    turn.last_anchor_seq = Some(items_seen);
                 }
                 self.state.anchors.push(usage);
             }
@@ -131,8 +138,56 @@ impl ContextProfiler {
             first_seq: self.items_seen + 1,
             measured_before: self.last_anchor_total,
             last_anchor: None,
+            last_anchor_seq: None,
         });
         index
+    }
+
+    /// Prices the items observed since this turn's previous anchor from the measured usage.
+    ///
+    /// Output-kind items are priced at every anchor, since `output_tokens` is an absolute. Input-kind
+    /// items need a pair of same-turn anchors, because only a delta reveals what the next request
+    /// serialised. Items left over when a turn closes stay on the byte proxy forever.
+    fn attribute_span(&mut self, usage: &UsageSnapshot) {
+        let Some(turn) = self.open_turn.as_ref() else {
+            return;
+        };
+        let span = turn.last_anchor_seq.map_or(turn.first_seq, |seq| seq + 1)..=self.items_seen;
+        let previous_total = turn.last_anchor;
+        self.reprice(&span, ItemKind::Output, usage.output_tokens);
+        if let Some(previous_total) = previous_total {
+            let delta = usage.input_tokens - previous_total;
+            if delta >= 0 {
+                self.reprice(&span, ItemKind::Input, delta);
+            }
+        }
+        self.rebuild_aggregates();
+    }
+
+    /// A whole total on a lone item is exact; a share of one is not.
+    fn reprice(&mut self, span: &RangeInclusive<u64>, kind: ItemKind, total: i64) {
+        let positions: Vec<usize> = self
+            .state
+            .snapshot
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| span.contains(&item.seq) && pricing_kind(item.category) == kind)
+            .map(|(position, _)| position)
+            .collect();
+        match positions.as_slice() {
+            [] => {}
+            [only] => self.state.snapshot.items[*only].cost = TokenCost::Exact(total),
+            _ => {
+                let weights: Vec<usize> = positions
+                    .iter()
+                    .map(|&position| self.state.snapshot.items[position].bytes)
+                    .collect();
+                for (&position, share) in positions.iter().zip(apportion(total, &weights)) {
+                    self.state.snapshot.items[position].cost = TokenCost::Estimated(share);
+                }
+            }
+        }
     }
 
     fn close_turn(&mut self, outcome: TurnOutcome) {
@@ -201,6 +256,59 @@ impl ContextProfiler {
 /// Crude placeholder cost, replaced by the M2d estimator.
 fn byte_proxy(bytes: usize) -> i64 {
     (bytes / 4) as i64
+}
+
+/// Which measured total prices an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemKind {
+    /// Serialised into the next request, so an anchor delta prices it.
+    Input,
+    /// One response's own output, so that response's `output_tokens` prices it.
+    Output,
+    /// Neither; stays on the byte proxy.
+    Unpriced,
+}
+
+fn pricing_kind(category: Category) -> ItemKind {
+    match category {
+        Category::UserMessage | Category::ToolOutput => ItemKind::Input,
+        Category::AgentMessage | Category::Reasoning | Category::ToolCall => ItemKind::Output,
+        Category::Instructions | Category::Compaction | Category::Other => ItemKind::Unpriced,
+    }
+}
+
+/// Splits `total` across `weights` so the shares sum to exactly `total`.
+///
+/// Each share is the running floor of the cumulative weight fraction minus what is already handed
+/// out, so the last cumulative floor is `total` itself and the rounding remainder lands on later
+/// entries rather than being lost. Weightless items split evenly, remainder to the earliest.
+fn apportion(total: i64, weights: &[usize]) -> Vec<i64> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+    if total <= 0 {
+        return vec![0; weights.len()];
+    }
+    let count = weights.len() as i128;
+    let total = i128::from(total);
+    let total_weight: i128 = weights.iter().map(|&weight| weight as i128).sum();
+    if total_weight == 0 {
+        let base = total / count;
+        let remainder = total % count;
+        return (0..count)
+            .map(|index| (base + i128::from(index < remainder)) as i64)
+            .collect();
+    }
+    let mut shares = Vec::with_capacity(weights.len());
+    let mut cumulative_weight: i128 = 0;
+    let mut assigned: i128 = 0;
+    for &weight in weights {
+        cumulative_weight += weight as i128;
+        let cumulative = total * cumulative_weight / total_weight;
+        shares.push((cumulative - assigned) as i64);
+        assigned = cumulative;
+    }
+    shares
 }
 
 /// Exhaustive so a new upstream `ResponseItem` variant fails the build.

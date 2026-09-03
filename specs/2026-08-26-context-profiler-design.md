@@ -726,6 +726,52 @@ more controllable than fighting the config, and the `<-- MULTI` flag in
 - **Interrupted turns strand items past the last anchor.** Those items have no measured cost and can
   only be estimated (findings §10.1).
 
+### The implemented contract
+
+Every item is one of two structural classes, decided by its `ResponseItem` variant:
+
+| class | items | priced by |
+|---|---|---|
+| **input-kind** | tool outputs, user messages | the anchor **delta**, because they are serialised into the *next* request |
+| **output-kind** | reasoning, agent messages, tool calls | that response's own `output_tokens` |
+
+Compaction and `Other` items are neither and stay on the byte proxy.
+
+At each anchor, the **span** is the items observed since that turn's previous anchor, or since the
+turn started if this is its first anchor.
+
+1. **Output-kind pricing works at every anchor, including the first.** `output_tokens` is an
+   absolute, not a difference, so it needs only the one anchor.
+2. **Input-kind pricing needs a pair of anchors in the same turn.**
+   `delta = input_tokens(n+1) − total_tokens(n)`. The same-turn requirement is what excludes the
+   cross-turn shrink of §10.4 structurally, rather than by a special case.
+3. **A negative delta attributes nothing.** The span's input-kind items keep the byte proxy.
+4. **Stranding is permanent.** When a turn ends, items not yet priced stay on the proxy forever and
+   the pending span is cleared. Mid-turn items price normally at the next same-turn anchor.
+5. **An unmatched total goes unattributed.** A positive delta over a span with no input-kind items
+   is not invented onto other items; it lands in the reconciliation drift. Same for `output_tokens`
+   over a span with no output-kind items.
+
+Verified against the §6.2 capture: anchor A reports total 25,422; a `CustomToolCallOutput` and then
+a `Reasoning` item arrive; anchor B reports `input_tokens` 29,137. The delta of **3,715** prices the
+tool output alone - the reasoning item is not input to B, it is inside B's own `output_tokens` of 93.
+
+**Apportionment.** When a span holds several items of one class, the measured total is split by
+serialised byte weight using a cumulative floor:
+
+```
+share_i = floor(total × cumulative_weight_i / total_weight) − already_assigned
+```
+
+The final cumulative floor is exactly `total`, so the shares sum to the total by construction and
+the rounding remainder falls on later entries rather than being lost. Iteration is in `seq` order,
+so ties break deterministically. Items with no bytes at all split evenly, remainder to the earliest
+`seq`s. A non-positive total yields all zeros.
+
+**Exactness follows from wholeness, not from provenance.** An item that receives a whole measured
+total is `Exact`; any apportioned share is `Estimated`, and a group is `Exact` only when every
+member is.
+
 ## Reconciliation
 
 **Anchor on `total_tokens` (`input + output`), counting every item seen so far.**
