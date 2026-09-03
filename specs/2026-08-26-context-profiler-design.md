@@ -979,6 +979,23 @@ large residual, empty/new session, and one huge contributor with a long label (l
 
 ### Fixtures
 
+**M2c - what shipped.** `context-profiler/src/fixture_tests.rs` transcribes captures into Rust
+rather than committing them: a builder pads each item's string payload until
+`serde_json::to_vec(&item).len()` equals the capture's recorded byte count and asserts that
+equality itself, so byte weights - which drive apportionment - are reproduced, not approximated.
+Three replays sit on top of it: the §9.2 ladder, asserted as `Exact(1040)`, `Exact(3373)`,
+`Exact(2219)` and `Exact(5043)` to the token; the full 73-record live trace (42 items, 13 anchors,
+zero seq mismatches, the -205 cross-turn boundary of §10.4 and the 41,448-byte read priced at
+8,942); and the interrupted turn of §10.1. Captures record no message role, so a turn's opening
+message is taken as the user's.
+
+In place of §10.5's literal shuffled-input test, M2c ships a determinism suite. Arrival order *is*
+the fold's semantics - reordering the input changes which span an item falls in, so a shuffled
+stream has no correct answer to assert against. The bug §10.5 actually describes is a container's
+iteration order leaking into output, so the suite pins the outputs instead: two folds of the same
+event vector serialise byte-identically, `snapshot.items` is in ascending `seq`, groups are in
+first-member `seq` order, and `by_category` is in `Category` declaration order.
+
 Two kinds, deliberately independent so the oracle test is not circular:
 
 - **Semantic fixture** - a scrubbed `ProfilerEvent` stream for equivalence, classification,

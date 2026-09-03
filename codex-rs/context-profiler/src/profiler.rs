@@ -385,3 +385,7 @@ fn call_id(item: &ResponseItem) -> Option<String> {
 #[cfg(test)]
 #[path = "profiler_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "fixture_tests.rs"]
+mod fixture_tests;
