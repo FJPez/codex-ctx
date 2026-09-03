@@ -79,7 +79,5 @@ pub struct ProfilerState {
     pub snapshot: ContextSnapshot,
     pub invalidated: Option<InvalidationReason>,
     pub unrecognized_fragment_count: u32,
-    /// Times the adapter and the profiler disagreed about how many items the stream carried.
-    pub seq_mismatch_count: u32,
     pub anchors: Vec<UsageSnapshot>,
 }

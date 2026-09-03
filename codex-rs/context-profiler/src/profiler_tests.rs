@@ -191,7 +191,6 @@ fn single_turn_folds_items_anchor_and_turn_delta() {
         },
         invalidated: None,
         unrecognized_fragment_count: 0,
-        seq_mismatch_count: 0,
         anchors: vec![anchor(1_200, 1_200, 40, 3)],
     };
     assert_eq!(&expected, profiler.state());
@@ -308,7 +307,7 @@ fn invalidation_freezes_everything_but_the_window() {
 }
 
 #[test]
-fn interrupted_turn_has_no_measured_after_but_seeds_the_next_turn() {
+fn interrupted_turn_leaves_both_turns_unmeasured() {
     let item = message_item("interrupted");
 
     let mut profiler = ContextProfiler::new();
@@ -336,11 +335,12 @@ fn interrupted_turn_has_no_measured_after_but_seeds_the_next_turn() {
     let turns = &profiler.state().snapshot.turns;
     assert_eq!(None, turns[0].measured_added());
     assert_eq!(None, turns[0].measured_after);
-    assert_eq!(Some(2_500), turns[1].measured_before);
+    assert_eq!(None, turns[1].measured_before);
+    assert_eq!(None, turns[1].measured_added());
 }
 
 #[test]
-fn forged_usage_seq_counts_a_mismatch_and_still_anchors() {
+fn forged_usage_seq_invalidates_without_anchoring() {
     let item = message_item("one item");
 
     let mut profiler = ContextProfiler::new();
@@ -355,8 +355,113 @@ fn forged_usage_seq_counts_a_mismatch_and_still_anchors() {
     });
 
     let state = profiler.state();
-    assert_eq!(1, state.seq_mismatch_count);
-    assert_eq!(vec![usage(700, 2)], state.anchors);
+    assert_eq!(
+        Some(InvalidationReason::SequenceMismatch {
+            anchor_items_seen: 2,
+            profiler_items_seen: 1,
+        }),
+        state.invalidated
+    );
+    assert_eq!(Vec::<UsageSnapshot>::new(), state.anchors);
+    assert_eq!(
+        TokenCost::Estimated(byte_proxy(item_bytes(&item))),
+        state.snapshot.items[0].cost
+    );
+}
+
+/// A response without usage is a boundary: nothing across it is priced, but the next response is.
+#[test]
+fn missing_usage_isolates_the_next_response() {
+    let reasoning_a = reasoning_item();
+    let call_a = custom_tool_call("call_a");
+    let output_a = custom_tool_call_output("call_a");
+    let reasoning_b = reasoning_item();
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted {
+        turn_id: OTHER_TURN,
+    });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: OTHER_TURN,
+        usage: anchor(1_000, 1_000, 0, 0),
+    });
+    profiler.observe(ProfilerEvent::TurnEnded {
+        turn_id: OTHER_TURN,
+        completed: true,
+    });
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    for item in [&reasoning_a, &call_a] {
+        profiler.observe(ProfilerEvent::Item {
+            turn_id: TURN,
+            item,
+        });
+    }
+    profiler.observe(ProfilerEvent::UsageMissing { turn_id: TURN });
+    profiler.observe(ProfilerEvent::Item {
+        turn_id: TURN,
+        item: &output_a,
+    });
+    profiler.observe(ProfilerEvent::Item {
+        turn_id: TURN,
+        item: &reasoning_b,
+    });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: anchor(1_600, 1_500, 100, 4),
+    });
+    profiler.observe(ProfilerEvent::TurnEnded {
+        turn_id: TURN,
+        completed: true,
+    });
+
+    let state = profiler.state();
+    let costs: Vec<TokenCost> = state.snapshot.items.iter().map(|item| item.cost).collect();
+    assert_eq!(
+        vec![
+            TokenCost::Estimated(byte_proxy(item_bytes(&reasoning_a))),
+            TokenCost::Estimated(byte_proxy(item_bytes(&call_a))),
+            TokenCost::Estimated(byte_proxy(item_bytes(&output_a))),
+            TokenCost::Exact(100),
+        ],
+        costs
+    );
+    assert_eq!(None, state.invalidated);
+    let turn = &state.snapshot.turns[1];
+    assert_eq!(Some(1_000), turn.measured_before);
+    assert_eq!(Some(1_600), turn.measured_after);
+}
+
+/// Missing usage on a turn's final response leaves both turn boundaries unmeasured.
+#[test]
+fn missing_usage_at_turn_end_clears_both_boundaries() {
+    let item = message_item("last response");
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_000, 0),
+    });
+    profiler.observe(ProfilerEvent::Item {
+        turn_id: TURN,
+        item: &item,
+    });
+    profiler.observe(ProfilerEvent::UsageMissing { turn_id: TURN });
+    profiler.observe(ProfilerEvent::TurnEnded {
+        turn_id: TURN,
+        completed: true,
+    });
+    profiler.observe(ProfilerEvent::TurnStarted {
+        turn_id: OTHER_TURN,
+    });
+    profiler.observe(ProfilerEvent::TurnEnded {
+        turn_id: OTHER_TURN,
+        completed: true,
+    });
+
+    let turns = &profiler.state().snapshot.turns;
+    assert_eq!(None, turns[0].measured_after);
+    assert_eq!(None, turns[1].measured_before);
 }
 
 #[test]

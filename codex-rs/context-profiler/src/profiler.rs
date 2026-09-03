@@ -8,6 +8,7 @@ use std::ops::RangeInclusive;
 
 use codex_protocol::models::ResponseItem;
 
+use crate::event::InvalidationReason;
 use crate::event::ProfilerEvent;
 use crate::item::Category;
 use crate::item::GroupKey;
@@ -92,7 +93,11 @@ impl ContextProfiler {
             ProfilerEvent::Usage { turn_id, usage } => {
                 self.turn_index(turn_id);
                 if usage.items_seq != self.items_seen {
-                    self.state.seq_mismatch_count += 1;
+                    self.state.invalidated = Some(InvalidationReason::SequenceMismatch {
+                        anchor_items_seen: usage.items_seq,
+                        profiler_items_seen: self.items_seen,
+                    });
+                    return;
                 }
                 let total = usage.reported_context_tokens;
                 self.attribute_span(&usage);
@@ -104,6 +109,15 @@ impl ContextProfiler {
                     turn.last_anchor_seq = Some(items_seen);
                 }
                 self.state.anchors.push(usage);
+            }
+            ProfilerEvent::UsageMissing { turn_id } => {
+                self.turn_index(turn_id);
+                self.last_anchor_total = None;
+                let items_seen = self.items_seen;
+                if let Some(turn) = self.open_turn.as_mut() {
+                    turn.last_anchor = None;
+                    turn.last_anchor_seq = Some(items_seen);
+                }
             }
             ProfilerEvent::WindowUpdated { window, .. } => {
                 self.state.snapshot.window = Some(window);
@@ -205,7 +219,10 @@ impl ContextProfiler {
             .sum();
         let measured_after = match outcome {
             TurnOutcome::Completed => turn.last_anchor,
-            TurnOutcome::Incomplete => None,
+            TurnOutcome::Incomplete => {
+                self.last_anchor_total = None;
+                None
+            }
         };
         self.state.snapshot.turns.push(TurnDelta {
             turn_id: turn.turn_id,

@@ -241,6 +241,8 @@ pub enum ProfilerEvent<'a> {
     TurnStarted { turn_id: &'a str },
     Item        { turn_id: &'a str, item: &'a ResponseItem },
     Usage       { turn_id: &'a str, usage: UsageSnapshot },
+    /// A response completed without usage: a boundary that prices nothing.
+    UsageMissing { turn_id: &'a str },
     /// The model context window reported by `thread/tokenUsage/updated`.
     WindowUpdated { turn_id: &'a str, window: i64 },
     TurnEnded   { turn_id: &'a str, completed: bool },
@@ -253,11 +255,17 @@ pub enum InvalidationReason {
     EventsDropped { skipped: usize },
     /// A compaction item was observed. History was rewritten out from under us.
     Compacted,
+    /// An anchor's item count disagreed with the profiler's: the item stream is incomplete.
+    SequenceMismatch { anchor_items_seen: u64, profiler_items_seen: u64 },
 }
 ```
 
-This event contract is final: the six variants above are the whole input surface, and adapters
-map every stream they consume onto them.
+This event contract is final: the seven variants above are the whole input surface, and adapters
+map every stream they consume onto them. `UsageMissing` was added by the M2c review: a response
+without usage is not merely a wider span - it merges two responses, and the input/output class
+split assumes exactly one response per span. Without the boundary event, response A's outputs
+would be priced from response B's `output_tokens` and B's input delta would land entirely on the
+tool output, labelled `Exact`.
 
 **`WindowUpdated` is a separate event because the window is not a property of an anchor.** The
 model context window is not constant for a session - `/model` switches the model mid-session - so
@@ -372,9 +380,9 @@ adapter emits the two independently - `Usage` from `rawResponse/completed`, `Win
 That also keeps the window correct across a mid-session `/model` switch.
 
 `RawResponseCompletedNotification.usage` is `Option<…>`. When it is `None` — cancelled or failed
-attempts — **emit no anchor**; the trace records a `MissingUsage` entry (an acquisition
-diagnostic, owned by the adapter, not profiler analytics - the profiler simply sees a wider
-anchor span, which apportioning handles). An anchor with a
+attempts — **emit no anchor**; the adapter records a `MissingUsage` trace entry and emits
+`ProfilerEvent::UsageMissing`, which the profiler treats as an unpriced response boundary (see
+"The implemented contract"). An anchor with a
 guessed value would corrupt every subsequent residual. Covered by a Spike D test.
 
 The fallback path is narrow: if raw events are off there are no items either, so `/ctx` is in its
@@ -626,8 +634,6 @@ pub struct ProfilerState {
     pub invalidated: Option<InvalidationReason>,
     /// Surfaced in `/ctx`: classification gaps we know about.
     pub unrecognized_fragment_count: u32,
-    /// The adapter and profiler disagreed about the stream (items_seq cross-check).
-    pub seq_mismatch_count: u32,
     /// Reconciliation input, not diagnostics.
     pub anchors: Vec<UsageSnapshot>,
 }
@@ -751,6 +757,22 @@ turn started if this is its first anchor.
 5. **An unmatched total goes unattributed.** A positive delta over a span with no input-kind items
    is not invented onto other items; it lands in the reconciliation drift. Same for `output_tokens`
    over a span with no output-kind items.
+6. **Missing usage is an unpriced boundary.** `UsageMissing` advances the span start to the
+   current item count and clears the turn's previous anchor and the global last anchor, without
+   touching the turn's `measured_before`. Items before the boundary stay estimated; the next
+   response's outputs are still priced from its own `output_tokens`; no input delta is computed
+   across the gap. If it was the turn's final response, both `measured_after` and the next turn's
+   `measured_before` are `None`.
+7. **An incomplete turn clears the global anchor.** The next turn starts with
+   `measured_before: None`, so every `measured_added() == Some(..)` is bounded by trustworthy
+   anchors around that one turn - never a stale anchor inside an earlier turn's unmeasured tail.
+   The ordinary cross-turn shrink (findings 10.4) is still inside the figure; that is a real
+   boundary-to-boundary change, not an inherited unmeasured tail.
+8. **A sequence mismatch invalidates immediately.** If an anchor's `items_seq` disagrees with the
+   profiler's own count, the item stream is incomplete and no later anchor can reconstruct which
+   tokens belonged to the missing item. The anchor is neither pushed nor applied;
+   `InvalidationReason::SequenceMismatch` carries both counts. Recovery rules belong to M5's
+   epochs.
 
 Verified against the §6.2 capture: anchor A reports total 25,422; a `CustomToolCallOutput` and then
 a `Reasoning` item arrive; anchor B reports `input_tokens` 29,137. The delta of **3,715** prices the

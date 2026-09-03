@@ -374,7 +374,6 @@ fn live_trace_records() -> Vec<Record> {
 fn the_live_trace_folds_into_the_measured_totals() {
     let state = fold(&live_trace_records()).state().clone();
 
-    assert_eq!(0, state.seq_mismatch_count);
     assert_eq!(13, state.anchors.len());
     assert_eq!(42, state.snapshot.items.len());
     assert_eq!(
