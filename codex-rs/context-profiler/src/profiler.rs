@@ -9,6 +9,7 @@ use std::ops::RangeInclusive;
 use codex_protocol::models::ResponseItem;
 
 use crate::classify::classify;
+use crate::estimate::item_tokens;
 use crate::event::InvalidationReason;
 use crate::event::ProfilerEvent;
 use crate::item::Category;
@@ -90,7 +91,11 @@ impl ContextProfiler {
                     category: classification.category,
                     pricing: classification.pricing,
                     bytes,
-                    cost: TokenCost::Estimated(byte_proxy(bytes)),
+                    cost: TokenCost::Estimated(item_tokens(
+                        classification.category,
+                        &classification.parts,
+                        bytes,
+                    )),
                     label: item_kind(item).to_string(),
                     group,
                     item_id: item.id().map(ToString::to_string),
@@ -169,11 +174,19 @@ impl ContextProfiler {
     ///
     /// Output-kind items are priced at every anchor, since `output_tokens` is an absolute. Input-kind
     /// items need a pair of same-turn anchors, because only a delta reveals what the next request
-    /// serialised. Items left over when a turn closes stay on the byte proxy forever.
+    /// serialised. Items left over when a turn closes keep their estimates forever.
+    ///
+    /// `reasoning_output_tokens` is a documented subset of `output_tokens` (the API's
+    /// `output_tokens_details.reasoning_tokens`), so the output pass splits in two: reasoning items
+    /// share the subset and the rest share what is left. Reasoning is priced per byte nothing like
+    /// prose, so mixing the two into one apportionment is what the split exists to avoid.
     ///
     /// One `Ambiguous` item poisons its whole span: neither measured total can be divided when part
     /// of the span may have landed in the other one, so the span keeps its estimates. The anchor is
     /// still recorded and still closes the span, so the next span prices normally.
+    ///
+    /// Reasoning tokens split off from the output pool only when the anchor reports them; a zero
+    /// is what an unreported `output_tokens_details` reads as, never evidence of free reasoning.
     fn attribute_span(&mut self, usage: &UsageSnapshot) {
         let Some(turn) = self.open_turn.as_ref() else {
             return;
@@ -183,11 +196,25 @@ impl ContextProfiler {
         if self.span_is_ambiguous(&span) {
             return;
         }
-        self.reprice(&span, PricingKind::Output, usage.output_tokens);
+        let output = self.positions(&span, PricingKind::Output);
+        if usage.reasoning_output_tokens > 0 {
+            let (reasoning, generated): (Vec<usize>, Vec<usize>) =
+                output.into_iter().partition(|&position| {
+                    self.state.snapshot.items[position].category == Category::Reasoning
+                });
+            self.reprice(&reasoning, usage.reasoning_output_tokens);
+            self.reprice(
+                &generated,
+                (usage.output_tokens - usage.reasoning_output_tokens).max(0),
+            );
+        } else {
+            self.reprice(&output, usage.output_tokens);
+        }
         if let Some(previous_total) = previous_total {
             let delta = usage.input_tokens - previous_total;
             if delta >= 0 {
-                self.reprice(&span, PricingKind::Input, delta);
+                let input = self.positions(&span, PricingKind::Input);
+                self.reprice(&input, delta);
             }
         }
         self.rebuild_aggregates();
@@ -201,24 +228,31 @@ impl ContextProfiler {
             .any(|item| span.contains(&item.seq) && item.pricing == PricingKind::Ambiguous)
     }
 
-    /// A whole total on a lone item is exact; a share of one is not.
-    fn reprice(&mut self, span: &RangeInclusive<u64>, kind: PricingKind, total: i64) {
-        let positions: Vec<usize> = self
-            .state
+    fn positions(&self, span: &RangeInclusive<u64>, kind: PricingKind) -> Vec<usize> {
+        self.state
             .snapshot
             .items
             .iter()
             .enumerate()
             .filter(|(_, item)| span.contains(&item.seq) && item.pricing == kind)
             .map(|(position, _)| position)
-            .collect();
-        match positions.as_slice() {
+            .collect()
+    }
+
+    /// A whole total on a lone item is exact; a share of one is not.
+    ///
+    /// Shares are weighted by each item's current cost, which is still its initial estimate: an item
+    /// is repriced exactly once, when its span closes, and the passes above weight disjoint sets.
+    /// Bytes would be the wrong weight, since an image contributes tens of kilobytes of base64 for
+    /// roughly the tokens of a paragraph.
+    fn reprice(&mut self, positions: &[usize], total: i64) {
+        match positions {
             [] => {}
             [only] => self.state.snapshot.items[*only].cost = TokenCost::Exact(total),
             _ => {
-                let weights: Vec<usize> = positions
+                let weights: Vec<i64> = positions
                     .iter()
-                    .map(|&position| self.state.snapshot.items[position].bytes)
+                    .map(|&position| self.state.snapshot.items[position].cost.tokens())
                     .collect();
                 for (&position, share) in positions.iter().zip(apportion(total, &weights)) {
                     self.state.snapshot.items[position].cost = TokenCost::Estimated(share);
@@ -293,17 +327,12 @@ impl ContextProfiler {
     }
 }
 
-/// Crude placeholder cost, replaced by the M2d estimator.
-fn byte_proxy(bytes: usize) -> i64 {
-    (bytes / 4) as i64
-}
-
 /// Splits `total` across `weights` so the shares sum to exactly `total`.
 ///
 /// Each share is the running floor of the cumulative weight fraction minus what is already handed
 /// out, so the last cumulative floor is `total` itself and the rounding remainder lands on later
 /// entries rather than being lost. Weightless items split evenly, remainder to the earliest.
-fn apportion(total: i64, weights: &[usize]) -> Vec<i64> {
+fn apportion(total: i64, weights: &[i64]) -> Vec<i64> {
     if weights.is_empty() {
         return Vec::new();
     }
@@ -312,7 +341,7 @@ fn apportion(total: i64, weights: &[usize]) -> Vec<i64> {
     }
     let count = weights.len() as i128;
     let total = i128::from(total);
-    let total_weight: i128 = weights.iter().map(|&weight| weight as i128).sum();
+    let total_weight: i128 = weights.iter().copied().map(i128::from).sum();
     if total_weight == 0 {
         let base = total / count;
         let remainder = total % count;
@@ -324,7 +353,7 @@ fn apportion(total: i64, weights: &[usize]) -> Vec<i64> {
     let mut cumulative_weight: i128 = 0;
     let mut assigned: i128 = 0;
     for &weight in weights {
-        cumulative_weight += weight as i128;
+        cumulative_weight += i128::from(weight);
         let cumulative = total * cumulative_weight / total_weight;
         shares.push((cumulative - assigned) as i64);
         assigned = cumulative;

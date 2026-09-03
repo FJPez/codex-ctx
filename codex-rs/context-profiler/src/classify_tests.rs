@@ -408,6 +408,7 @@ fn a_configuration_update_is_one_ambiguous_part() {
             kind: "configuration_update".to_string(),
             bytes: serde_json::to_vec(&item).expect("serializable item").len(),
             category: Category::Other,
+            is_image: false,
         }],
         classification.parts
     );

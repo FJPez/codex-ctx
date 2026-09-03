@@ -47,10 +47,12 @@ pub struct ContentPart {
     pub kind: String,
     pub bytes: usize,
     pub category: Category,
+    /// Priced at a flat per-image cost rather than from its bytes.
+    pub is_image: bool,
 }
 
 /// A whole measured total on one item is `Exact`; a proportional share of a measured total is
-/// `Estimated`, as is a byte proxy.
+/// `Estimated`, as is an unmeasured estimate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TokenCost {
     Exact(i64),

@@ -77,6 +77,7 @@ pub(crate) fn classify(item: &ResponseItem) -> Classification {
                 kind: "configuration_update".to_string(),
                 bytes: serde_json::to_vec(item).map(|json| json.len()).unwrap_or(0),
                 category: Category::Other,
+                is_image: false,
             }],
             warned: false,
         },
@@ -178,6 +179,7 @@ fn message_parts(
                 .map(|json| json.len())
                 .unwrap_or(0),
             category: entry_category(role, kinds.get(index).map(String::as_str), entry, warned),
+            is_image: matches!(entry, ContentItem::InputImage { .. }),
         })
         .collect()
 }

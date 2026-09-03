@@ -5,6 +5,8 @@
 //! expectation. Item payloads are padding: only the serialised length is faithful.
 
 use super::*;
+use crate::classify::classify;
+use crate::estimate::text_tokens;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -220,6 +222,16 @@ fn fold(records: &[Record]) -> ContextProfiler {
     profiler
 }
 
+/// The initial estimate an item carries until an anchor prices it.
+fn estimated(item: &ResponseItem) -> TokenCost {
+    let classification = classify(item);
+    TokenCost::Estimated(item_tokens(
+        classification.category,
+        &classification.parts,
+        serialized_len(item),
+    ))
+}
+
 fn costs(state: &ProfilerState) -> Vec<TokenCost> {
     state.snapshot.items.iter().map(|item| item.cost).collect()
 }
@@ -262,6 +274,8 @@ fn the_measured_ladder_prices_every_tool_output_to_the_token() {
     let state = fold(&ladder_records()).state().clone();
 
     // Each span holds one tool output and one reasoning item, so both take a whole measured total.
+    // The captures never transcribed `output_tokens_details.reasoning_tokens`, so the anchors
+    // report zero and the reasoning item takes the whole `output_tokens` as the only output item.
     let expected = vec![
         TokenCost::Exact(1_040),
         TokenCost::Exact(93),
@@ -420,16 +434,19 @@ fn the_big_read_is_priced_by_the_anchors_around_it() {
 }
 
 #[test]
-fn the_negative_turn_boundary_leaves_the_first_span_on_the_proxy() {
+fn the_negative_turn_boundary_leaves_the_first_span_on_its_estimate() {
     let state = fold(&live_trace_records()).state().clone();
 
     // Turn 1 closes at 33,318 and turn 2 opens at input 33,113: the context shrank by 205. The
     // same-turn rule never sees that, because turn 2's first anchor has no previous same-turn
-    // anchor, so its one input-kind item keeps the byte proxy.
+    // anchor, so its one input-kind item keeps its estimate.
     let opening_message = &state.snapshot.items[15];
     assert_eq!(395, opening_message.bytes);
     assert_eq!(Category::UserMessage, opening_message.category);
-    assert_eq!(TokenCost::Estimated(byte_proxy(395)), opening_message.cost);
+    assert_eq!(
+        TokenCost::Estimated(text_tokens(opening_message.parts[0].bytes)),
+        opening_message.cost
+    );
 }
 
 #[test]
@@ -557,8 +574,8 @@ fn an_interrupted_turn_strands_its_trailing_items_permanently() {
     assert_eq!(
         vec![
             TokenCost::Exact(130),
-            TokenCost::Estimated(byte_proxy(291)),
-            TokenCost::Estimated(byte_proxy(526)),
+            estimated(&sized(Kind::ToolOutput("call_spike_d"), 291)),
+            estimated(&sized(Kind::AgentMessage, 526)),
             TokenCost::Exact(300),
         ],
         costs(&state)

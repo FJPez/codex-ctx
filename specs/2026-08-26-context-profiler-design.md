@@ -832,8 +832,49 @@ Verified against the §6.2 capture: anchor A reports total 25,422; a `CustomTool
 a `Reasoning` item arrive; anchor B reports `input_tokens` 29,137. The delta of **3,715** prices the
 tool output alone - the reasoning item is not input to B, it is inside B's own `output_tokens` of 93.
 
+### Estimator
+
+Every item starts on an estimate and stays there until an anchor prices it. The estimate is
+calibrated against the Spike C captures - bytes are the serialised JSON sizes the profiler itself
+measures, tokens are provider-reported:
+
+| what | bytes | tokens | bytes/token |
+|---|---|---|---|
+| tool outputs | 4,792 / 15,876 / 14,152 / 24,567 | 1,040 / 3,373 / 2,219 / 5,043 | 4.61 / 4.71 / 6.38 / 4.87 |
+| whole first request | 116,100 | 25,230 | 4.60 |
+| hidden residual | 53,951 | ~11,700 | 4.61 |
+| live-trace big read | 41,448 | 8,942 | 4.64 |
+| one Reasoning item | 1,593 | 14 | 113.8 |
+
+- **Text: one global constant, 4.64 bytes/token** - the median of the seven non-reasoning densities,
+  held as `bytes x 100 / 464` in `i128` so it is exact integer arithmetic that saturates rather than
+  wraps. No per-category factors: the seven points sit in a 4.60-6.38 band, which is narrower than
+  the error any per-category split would be fitted on.
+- **Reasoning: `bytes / 100`.** Encrypted reasoning content is an opaque blob the provider stores,
+  not text the model reads, and costs about 1% of its byte size. One data point, 1,593 B -> 14
+  tokens, so it is deliberately coarse.
+- **Images: a flat 1,844 tokens each**, mirroring core's `RESIZED_IMAGE_BYTES_ESTIMATE` of 7,373
+  bytes at its 4-bytes/token heuristic (`core/src/context_manager/history.rs:734`). *Limitation:*
+  core prices `detail: "original"` images from their decoded dimensions instead, counting 32px
+  patches up to a 10,000 cap. The profiler never decodes an image, so an unusually large `original`
+  image is under-counted and the difference lands in drift.
+
+A message is estimated per content entry, so a mixed one - text alongside an image - is not priced
+as if the image's base64 were prose. Every other item is estimated from its whole serialised size.
+
+**Reasoning is priced from its own measured total.** `reasoning_output_tokens` is a documented
+subset of `output_tokens` (the API's `output_tokens_details.reasoning_tokens`), so the output pass
+splits in two: `Reasoning` items in the span share `reasoning_output_tokens`, and the remaining
+output-kind items share `output_tokens - reasoning_output_tokens`, floored at zero. A span with no
+reasoning items shares `output_tokens` whole, as before. The split applies only when the anchor
+reports a positive reasoning subset: a zero is what an unreported `output_tokens_details` reads
+as, never evidence of free reasoning, so a zero pools every output item on `output_tokens` by
+estimate weight rather than minting `Exact(0)` from missing data. Mixing the two
+into one apportionment is what the split exists to avoid, since reasoning costs two orders of
+magnitude less per byte than prose.
+
 **Apportionment.** When a span holds several items of one class, the measured total is split by
-serialised byte weight using a cumulative floor:
+**each item's current estimate** using a cumulative floor:
 
 ```
 share_i = floor(total × cumulative_weight_i / total_weight) − already_assigned
@@ -841,8 +882,14 @@ share_i = floor(total × cumulative_weight_i / total_weight) − already_assigne
 
 The final cumulative floor is exactly `total`, so the shares sum to the total by construction and
 the rounding remainder falls on later entries rather than being lost. Iteration is in `seq` order,
-so ties break deterministically. Items with no bytes at all split evenly, remainder to the earliest
-`seq`s. A non-positive total yields all zeros.
+so ties break deterministically. Items with no estimate at all split evenly, remainder to the
+earliest `seq`s. A non-positive total yields all zeros.
+
+Weighting by estimate rather than by serialised bytes matters most for images: 40 KB of base64 costs
+about the tokens of a paragraph, so a byte weight would hand an image nearly the whole delta and
+starve the tool output beside it. The weights are always the items' *initial* estimates, because an
+item is repriced exactly once - when its span closes - and the output and input passes weight
+disjoint sets.
 
 **Exactness follows from wholeness, not from provenance.** An item that receives a whole measured
 total is `Exact`; any apportioned share is `Estimated`, and a group is `Exact` only when every
@@ -1226,8 +1273,9 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
 1. **Truncation strategy** (Spike C). If reproduction via `codex-utils-output-truncation` is exact,
    attribution stays direct. If the policy is unobtainable from the TUI, the fallback is inferring
    effective contribution from successive usage anchors. Blocks M2.
-2. **Estimator calibration strategy** - global correction factor, per-category factors, or none.
-   Needs drift data before deciding.
+2. **Estimator calibration strategy** - *answered (M2d)*: a global constant of 4.64 bytes/token for
+   text, with separate rules only where the byte/token relationship genuinely breaks (encrypted
+   reasoning, images). See "Estimator" above. Revisit with M3 drift data.
 3. **Rollout-backed compaction enrichment on the live path** (M5). `CompactedItem` carries
    `replacement_history`, which the live notification does not, but the recorder writes
    asynchronously (`rollout/src/recorder.rs:1971`) so there is no flush guarantee when the

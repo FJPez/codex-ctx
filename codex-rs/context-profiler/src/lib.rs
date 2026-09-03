@@ -4,6 +4,7 @@
 //! profiler produces `ContextSnapshot`s describing what currently occupies the context window.
 
 mod classify;
+mod estimate;
 mod event;
 mod item;
 mod profiler;
