@@ -3,6 +3,7 @@
 //! An adapter feeds this crate `ProfilerEvent`s as a session progresses, and the
 //! profiler produces `ContextSnapshot`s describing what currently occupies the context window.
 
+mod classify;
 mod event;
 mod item;
 mod profiler;
@@ -12,9 +13,11 @@ mod usage;
 pub use event::InvalidationReason;
 pub use event::ProfilerEvent;
 pub use item::Category;
+pub use item::ContentPart;
 pub use item::GroupKey;
 pub use item::ItemGroup;
 pub use item::ItemSummary;
+pub use item::PricingKind;
 pub use item::TokenCost;
 pub use profiler::ContextProfiler;
 pub use snapshot::ContextSnapshot;

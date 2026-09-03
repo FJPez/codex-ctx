@@ -505,15 +505,31 @@ pub enum TokenCost {
     Estimated(i64),
 }
 
+/// Which measured total may price an item. Never derived from `Category`.
+pub enum PricingKind {
+    Input,
+    Output,
+    Ambiguous,
+}
+
+/// One entry of a message's content array, classified on its own. Bytes, not tokens.
+pub struct ContentPart {
+    pub kind: String,           // the ContentItemKind, or empty when absent
+    pub bytes: usize,
+    pub category: Category,
+}
+
 pub struct ItemSummary {
     pub seq: u64,
     pub turn_index: u32,
     pub category: Category,
+    pub pricing: PricingKind,
     pub bytes: usize,
     pub cost: TokenCost,
     pub label: String,          // capped
     pub group: GroupKey,
     pub item_id: Option<String>,
+    pub parts: Vec<ContentPart>,
 }
 
 /// One or more items that must be presented as a unit - typically a tool call
@@ -538,12 +554,49 @@ interrupted turn whose output lands in the next turn would fail to pair under tu
 exact orphan this grouping prevents. For collision safety add a diagnostics counter, not a
 composite key.
 
-`Message { role: "user" }` splits into `UserMessage` vs `Instructions` using the public
-`*_OPEN_TAG` constants in `codex_protocol::protocol` and `parse_hook_prompt_fragment`
-(`protocol/src/items.rs:655`). Core's authoritative matcher list is `pub(crate)`
-(`core/src/context/contextual_user_message.rs`), so our classification will drift. Mitigation: a
-tagged-but-unrecognised user message lands in `Instructions` **and** increments a counter surfaced
-in `/ctx`, turning a silent accuracy bug into a visible signal during dogfooding.
+**Display category comes from `content_item_kinds`, not from the item variant.** Core stamps
+`internal_chat_message_metadata_passthrough.content_item_kinds` on contextual messages: one
+`ContentItemKind` per entry of the message's `content` array, so several merged fragments in one
+`Message` each keep their own kind. Kinds are looked up **by index** (`kinds.get(i)` for content
+entry `i`), never zipped, so a short or long kind array cannot silently shift every later entry's
+classification; a length mismatch warns instead.
+
+The table for a `Message`, per content entry:
+
+| role | kind at that index | category |
+| --- | --- | --- |
+| `assistant` | never consulted | `AgentMessage`, never warns - core stamps `unknown` on outputs |
+| `system` | never consulted | `Instructions`, never warns |
+| any other role | never consulted | `Other`, warns |
+| `user` / `developer` | starts with `user.` | `UserMessage` |
+| `user` / `developer` | `compaction.summary` | `Compaction` (`compaction.auto_fallback_prompt` is an instruction) |
+| `user` / `developer` | any other non-empty kind that is not `unknown` | `Instructions` |
+| `user` / `developer` | missing, empty, or `unknown` | fallback on the twelve public `*_OPEN_TAG` constants: `Instructions` if the entry's text starts with one, else `UserMessage`; warns either way |
+
+Kind strings churn upstream (`host_skills.instructions` no longer exists), so nothing here matches a
+list of known kinds: an instruction fragment we have never heard of still reads as `Instructions`,
+silently. Non-message variants keep the structural mapping, and `ConfigurationUpdate` becomes a
+single part of kind `configuration_update`.
+
+An item's category is its parts' category when they agree, and `Other` with a warning when they
+genuinely disagree. `warned` is one flag per item however many uncertainties it held, so
+`classification_warning_count` counts items, not entries. Parts carry **bytes, not tokens**: a
+breakdown fine enough to explain a merged fragment, without pretending the estimator can split a
+measured total below item granularity.
+
+**Pricing is independent of the display category.** `PricingKind` is derived from the item variant
+and the message role alone: `Input` for user/developer messages and tool outputs, `Output` for
+assistant messages and every call and reasoning item, `Ambiguous` for system and unknown roles,
+`ConfigurationUpdate`, `CompactionTrigger`, `AdditionalTools`, `Compaction`, `ContextCompaction`,
+and `Other`. This is what fixes instruction fragments being unpriced: they display as `Instructions`
+but price as `Input`, because that is what the next request serialises. The `Ambiguous` invariant:
+if an attribution span contains an `Ambiguous` item, the whole span keeps its initial estimates -
+neither measured total can be divided when part of the span may have landed in the other one - but
+the anchor is still recorded and still closes the span, so the following span prices normally.
+
+> Upstream sync check: Inspect newly added ContentItemKind families. Existing members covered by
+> user.*, compaction.summary, and the default instruction rule require no code change. Update the
+> classifier only when a new family has different display or pricing semantics.
 
 ```rust
 pub struct TurnDelta {
@@ -632,8 +685,9 @@ pub struct ProfilerState {
     pub snapshot: ContextSnapshot,
     /// `None` while attribution is trustworthy.
     pub invalidated: Option<InvalidationReason>,
-    /// Surfaced in `/ctx`: classification gaps we know about.
-    pub unrecognized_fragment_count: u32,
+    /// Surfaced in `/ctx`: items with one or more classification uncertainties,
+    /// counted at most once per item.
+    pub classification_warning_count: u32,
     /// Reconciliation input, not diagnostics.
     pub anchors: Vec<UsageSnapshot>,
 }
@@ -1187,7 +1241,7 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
    fail for today's types, and a panic in a diagnostic layer must never take the session down,
    but a zero-byte item would take a zero share in apportioning - a quiet under-count. When M2d
    adds classification diagnostics, size items through one shared helper and count failures next
-   to `unrecognized_fragment_count` so `/ctx` can say "n items could not be sized".
+   to `classification_warning_count` so `/ctx` can say "n items could not be sized".
 
 ### Resolved since the first draft
 

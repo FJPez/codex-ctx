@@ -78,6 +78,7 @@ impl InitialContextSummary {
 pub struct ProfilerState {
     pub snapshot: ContextSnapshot,
     pub invalidated: Option<InvalidationReason>,
-    pub unrecognized_fragment_count: u32,
+    /// Items with one or more classification uncertainties, counted at most once per item.
+    pub classification_warning_count: u32,
     pub anchors: Vec<UsageSnapshot>,
 }

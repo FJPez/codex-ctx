@@ -28,6 +28,27 @@ impl Category {
     }
 }
 
+/// Which measured total may price an item. Never derived from `Category`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PricingKind {
+    /// Serialised into the next request, so an anchor delta prices it.
+    Input,
+    /// One response's own output, so that response's `output_tokens` prices it.
+    Output,
+    /// If an attribution span contains an `Ambiguous` item, leave the entire span on its initial
+    /// estimates. Still record the usage anchor and advance the span boundary.
+    Ambiguous,
+}
+
+/// One entry of a message's content array, classified on its own.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContentPart {
+    /// The harness-owned `ContentItemKind`, or empty when the entry carried none.
+    pub kind: String,
+    pub bytes: usize,
+    pub category: Category,
+}
+
 /// A whole measured total on one item is `Exact`; a proportional share of a measured total is
 /// `Estimated`, as is a byte proxy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -66,11 +87,14 @@ pub struct ItemSummary {
     pub seq: u64,
     pub turn_index: u32,
     pub category: Category,
+    pub pricing: PricingKind,
     pub bytes: usize,
     pub cost: TokenCost,
     pub label: String,
     pub group: GroupKey,
     pub item_id: Option<String>,
+    /// Per-content-entry breakdown, in bytes; empty for items without a content array.
+    pub parts: Vec<ContentPart>,
 }
 
 /// The display unit for "largest contributors": typically a tool call with its output.

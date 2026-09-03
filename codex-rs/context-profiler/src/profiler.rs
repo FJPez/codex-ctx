@@ -8,12 +8,14 @@ use std::ops::RangeInclusive;
 
 use codex_protocol::models::ResponseItem;
 
+use crate::classify::classify;
 use crate::event::InvalidationReason;
 use crate::event::ProfilerEvent;
 use crate::item::Category;
 use crate::item::GroupKey;
 use crate::item::ItemGroup;
 use crate::item::ItemSummary;
+use crate::item::PricingKind;
 use crate::item::TokenCost;
 use crate::snapshot::ProfilerState;
 use crate::snapshot::TurnDelta;
@@ -78,15 +80,21 @@ impl ContextProfiler {
                     Some(call_id) => GroupKey::ToolCall(call_id),
                     None => GroupKey::Ungrouped(seq),
                 };
+                let classification = classify(item);
+                if classification.warned {
+                    self.state.classification_warning_count += 1;
+                }
                 self.state.snapshot.items.push(ItemSummary {
                     seq,
                     turn_index,
-                    category: category(item),
+                    category: classification.category,
+                    pricing: classification.pricing,
                     bytes,
                     cost: TokenCost::Estimated(byte_proxy(bytes)),
                     label: item_kind(item).to_string(),
                     group,
                     item_id: item.id().map(ToString::to_string),
+                    parts: classification.parts,
                 });
                 self.rebuild_aggregates();
             }
@@ -162,31 +170,46 @@ impl ContextProfiler {
     /// Output-kind items are priced at every anchor, since `output_tokens` is an absolute. Input-kind
     /// items need a pair of same-turn anchors, because only a delta reveals what the next request
     /// serialised. Items left over when a turn closes stay on the byte proxy forever.
+    ///
+    /// One `Ambiguous` item poisons its whole span: neither measured total can be divided when part
+    /// of the span may have landed in the other one, so the span keeps its estimates. The anchor is
+    /// still recorded and still closes the span, so the next span prices normally.
     fn attribute_span(&mut self, usage: &UsageSnapshot) {
         let Some(turn) = self.open_turn.as_ref() else {
             return;
         };
         let span = turn.last_anchor_seq.map_or(turn.first_seq, |seq| seq + 1)..=self.items_seen;
         let previous_total = turn.last_anchor;
-        self.reprice(&span, ItemKind::Output, usage.output_tokens);
+        if self.span_is_ambiguous(&span) {
+            return;
+        }
+        self.reprice(&span, PricingKind::Output, usage.output_tokens);
         if let Some(previous_total) = previous_total {
             let delta = usage.input_tokens - previous_total;
             if delta >= 0 {
-                self.reprice(&span, ItemKind::Input, delta);
+                self.reprice(&span, PricingKind::Input, delta);
             }
         }
         self.rebuild_aggregates();
     }
 
+    fn span_is_ambiguous(&self, span: &RangeInclusive<u64>) -> bool {
+        self.state
+            .snapshot
+            .items
+            .iter()
+            .any(|item| span.contains(&item.seq) && item.pricing == PricingKind::Ambiguous)
+    }
+
     /// A whole total on a lone item is exact; a share of one is not.
-    fn reprice(&mut self, span: &RangeInclusive<u64>, kind: ItemKind, total: i64) {
+    fn reprice(&mut self, span: &RangeInclusive<u64>, kind: PricingKind, total: i64) {
         let positions: Vec<usize> = self
             .state
             .snapshot
             .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| span.contains(&item.seq) && pricing_kind(item.category) == kind)
+            .filter(|(_, item)| span.contains(&item.seq) && item.pricing == kind)
             .map(|(position, _)| position)
             .collect();
         match positions.as_slice() {
@@ -275,25 +298,6 @@ fn byte_proxy(bytes: usize) -> i64 {
     (bytes / 4) as i64
 }
 
-/// Which measured total prices an item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ItemKind {
-    /// Serialised into the next request, so an anchor delta prices it.
-    Input,
-    /// One response's own output, so that response's `output_tokens` prices it.
-    Output,
-    /// Neither; stays on the byte proxy.
-    Unpriced,
-}
-
-fn pricing_kind(category: Category) -> ItemKind {
-    match category {
-        Category::UserMessage | Category::ToolOutput => ItemKind::Input,
-        Category::AgentMessage | Category::Reasoning | Category::ToolCall => ItemKind::Output,
-        Category::Instructions | Category::Compaction | Category::Other => ItemKind::Unpriced,
-    }
-}
-
 /// Splits `total` across `weights` so the shares sum to exactly `total`.
 ///
 /// Each share is the running floor of the cumulative weight fraction minus what is already handed
@@ -326,30 +330,6 @@ fn apportion(total: i64, weights: &[usize]) -> Vec<i64> {
         assigned = cumulative;
     }
     shares
-}
-
-/// Exhaustive so a new upstream `ResponseItem` variant fails the build.
-fn category(item: &ResponseItem) -> Category {
-    match item {
-        ResponseItem::Reasoning { .. } => Category::Reasoning,
-        ResponseItem::FunctionCall { .. }
-        | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::ToolSearchCall { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. } => Category::ToolCall,
-        ResponseItem::FunctionCallOutput { .. }
-        | ResponseItem::CustomToolCallOutput { .. }
-        | ResponseItem::ToolSearchOutput { .. } => Category::ToolOutput,
-        ResponseItem::Message { role, .. } if role == "user" => Category::UserMessage,
-        ResponseItem::Message { .. } | ResponseItem::AgentMessage { .. } => Category::AgentMessage,
-        ResponseItem::Compaction { .. }
-        | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::ContextCompaction { .. } => Category::Compaction,
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::ConfigurationUpdate { .. }
-        | ResponseItem::Other => Category::Other,
-    }
 }
 
 fn item_kind(item: &ResponseItem) -> &'static str {

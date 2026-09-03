@@ -1,14 +1,27 @@
 use super::*;
+use crate::classify::classify;
 use crate::event::InvalidationReason;
 use crate::snapshot::ContextSnapshot;
 use crate::usage::UsageSnapshot;
+use codex_protocol::models::ConfigurationReasoning;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 
 const TURN: &str = "tu_1";
 const OTHER_TURN: &str = "tu_2";
+
+/// Core stamps one `ContentItemKind` per content entry; every message here has exactly one entry.
+fn kinds(kind: &str) -> Option<InternalChatMessageMetadataPassthrough> {
+    Some(InternalChatMessageMetadataPassthrough {
+        content_item_kinds: Some(vec![ContentItemKind(kind.to_string())]),
+        ..Default::default()
+    })
+}
 
 fn message_item(text: &str) -> ResponseItem {
     ResponseItem::Message {
@@ -18,7 +31,7 @@ fn message_item(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        internal_chat_message_metadata_passthrough: None,
+        internal_chat_message_metadata_passthrough: kinds("unknown"),
     }
 }
 
@@ -60,7 +73,40 @@ fn user_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
+        internal_chat_message_metadata_passthrough: kinds("user.text"),
+    }
+}
+
+/// A contextual fragment core injects as a user-role message, tagged with its own kind.
+fn instruction_message(kind: &str, text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: kinds(kind),
+    }
+}
+
+fn unknown_role_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "tool".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
         internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn configuration_update() -> ResponseItem {
+    ResponseItem::ConfigurationUpdate {
+        reasoning: ConfigurationReasoning {
+            effort: ReasoningEffort::Medium,
+        },
     }
 }
 
@@ -115,15 +161,18 @@ fn item_cost(item: &ResponseItem) -> TokenCost {
 }
 
 fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> ItemSummary {
+    let classification = classify(item);
     ItemSummary {
         seq,
         turn_index,
-        category: category(item),
+        category: classification.category,
+        pricing: classification.pricing,
         bytes: item_bytes(item),
         cost: item_cost(item),
         label: item_kind(item).to_string(),
         group,
         item_id: None,
+        parts: classification.parts,
     }
 }
 
@@ -190,7 +239,7 @@ fn single_turn_folds_items_anchor_and_turn_delta() {
             items,
         },
         invalidated: None,
-        unrecognized_fragment_count: 0,
+        classification_warning_count: 0,
         anchors: vec![anchor(1_200, 1_200, 40, 3)],
     };
     assert_eq!(&expected, profiler.state());
@@ -777,4 +826,109 @@ fn a_group_is_exact_only_when_every_member_is() {
     let groups = &profiler.state().snapshot.groups;
     assert_eq!(TokenCost::Exact(250), groups[0].cost);
     assert_eq!(TokenCost::Estimated(shares[1] + 140), groups[2].cost);
+}
+
+/// Injected instruction fragments are user-role input, so an anchor delta prices them; before the
+/// pricing kind was split off the display category they were left unpriced forever.
+#[test]
+fn instructions_share_the_input_delta_with_tool_output() {
+    let reminder = instruction_message("current_time.reminder", "it is late");
+    let output = custom_tool_call_output("call_1");
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_000, 0),
+    });
+    observe_items(&mut profiler, TURN, &[&reminder, &output]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_100, 2),
+    });
+
+    assert_eq!(
+        Category::Instructions,
+        profiler.state().snapshot.items[0].category
+    );
+    let shares = apportion(100, &[item_bytes(&reminder), item_bytes(&output)]);
+    assert_eq!(
+        vec![
+            TokenCost::Estimated(shares[0]),
+            TokenCost::Estimated(shares[1]),
+        ],
+        costs(&profiler)
+    );
+    assert_eq!(100, shares.iter().sum::<i64>());
+}
+
+/// A `ConfigurationUpdate` could land in either measured total, so its span is left alone - but the
+/// anchor still closes the span, and the next one prices normally.
+#[test]
+fn an_ambiguous_item_leaves_its_span_estimated_and_the_next_span_recovers() {
+    let update = configuration_update();
+    let poisoned = sized_tool_output("call_1", 4);
+    let recovered = custom_tool_call_output("call_2");
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_000, 0),
+    });
+    observe_items(&mut profiler, TURN, &[&update, &poisoned]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_100, 2),
+    });
+    observe_items(&mut profiler, TURN, &[&recovered]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_400, 3),
+    });
+
+    let state = profiler.state();
+    assert_eq!(
+        vec![
+            item_cost(&update),
+            item_cost(&poisoned),
+            TokenCost::Exact(300),
+        ],
+        costs(&profiler)
+    );
+    assert_eq!(0, state.classification_warning_count);
+    assert_eq!(3, state.anchors.len());
+}
+
+/// An unknown role is both a display warning and a pricing ambiguity, and neither invalidates.
+#[test]
+fn an_unknown_role_message_poisons_only_its_own_span() {
+    let odd = unknown_role_message("mystery");
+    let reasoning = reasoning_item();
+    let later = reasoning_item();
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: anchor(1_000, 1_000, 0, 0),
+    });
+    observe_items(&mut profiler, TURN, &[&odd, &reasoning]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: anchor(1_100, 1_050, 50, 2),
+    });
+    observe_items(&mut profiler, TURN, &[&later]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: anchor(1_160, 1_100, 60, 3),
+    });
+
+    let state = profiler.state();
+    assert_eq!(
+        vec![item_cost(&odd), item_cost(&reasoning), TokenCost::Exact(60),],
+        costs(&profiler)
+    );
+    assert_eq!(1, state.classification_warning_count);
+    assert_eq!(None, state.invalidated);
 }
