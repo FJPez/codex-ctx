@@ -6,6 +6,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_context_profiler::InvalidationReason;
 use codex_context_profiler::ProfilerEvent;
 use codex_context_profiler::UsageSnapshot;
+use codex_context_profiler::serialized_size;
 use codex_protocol::models::ResponseItem;
 use serde::Serialize;
 
@@ -235,9 +236,7 @@ fn to_record(
             Some(turn_id.to_string()),
             RecordedKind::Item {
                 item_kind: item_kind(item).to_string(),
-                bytes: serde_json::to_vec(item)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0),
+                bytes: serialized_size(item).unwrap_or(0),
                 items_seq,
                 stamped_turn_id: item.turn_id().map(str::to_string),
                 call_id: call_id(item),

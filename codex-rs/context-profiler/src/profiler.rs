@@ -10,6 +10,7 @@ use codex_protocol::models::ResponseItem;
 
 use crate::classify::classify;
 use crate::estimate::item_tokens;
+use crate::estimate::serialized_size;
 use crate::event::InvalidationReason;
 use crate::event::ProfilerEvent;
 use crate::item::Category;
@@ -76,7 +77,13 @@ impl ContextProfiler {
                 let turn_index = self.turn_index(turn_id);
                 self.items_seen += 1;
                 let seq = self.items_seen;
-                let bytes = serde_json::to_vec(item).map(|json| json.len()).unwrap_or(0);
+                let bytes = match serialized_size(item) {
+                    Some(bytes) => bytes,
+                    None => {
+                        self.state.unsizable_item_count += 1;
+                        0
+                    }
+                };
                 let group = match call_id(item) {
                     Some(call_id) => GroupKey::ToolCall(call_id),
                     None => GroupKey::Ungrouped(seq),

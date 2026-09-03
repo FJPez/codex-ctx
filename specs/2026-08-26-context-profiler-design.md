@@ -849,7 +849,10 @@ measures, tokens are provider-reported:
 - **Text: one global constant, 4.64 bytes/token** - the median of the seven non-reasoning densities,
   held as `bytes x 100 / 464` in `i128` so it is exact integer arithmetic that saturates rather than
   wraps. No per-category factors: the seven points sit in a 4.60-6.38 band, which is narrower than
-  the error any per-category split would be fitted on.
+  the error any per-category split would be fitted on. For comparison, core's own heuristic is a
+  bare `APPROX_BYTES_PER_TOKEN = 4` (`utils/string/src/truncate.rs`), documented only as
+  "coarse"; it serves truncation and auto-compact budgets, where over-estimating tokens is the
+  safe error, which is why the profiler calibrates its own constant rather than reusing it.
 - **Reasoning: `bytes / 100`.** Encrypted reasoning content is an opaque blob the provider stores,
   not text the model reads, and costs about 1% of its byte size. One data point, 1,593 B -> 14
   tokens, so it is deliberately coarse.
@@ -1198,7 +1201,7 @@ branch. Each stage compiles and passes `just test -p codex-context-profiler` at 
 | M2a | `context-profiler-crate` | Crate skeleton, `BUILD.bazel` + lock update, `ProfilerEvent` and all model types, no logic (~350) | Workspace builds; `just bazel-lock-check` passes |
 | M2b | `profiler-live-adapter` | Scoped `experimental_raw_events`, notification→event (no usage buffering: `WindowUpdated` is its own event), `Lagged` broadcast, `ProfilerRegistry` on `App`, JSONL writer (~500) | A live session's adapter JSONL matches the M1 probe log |
 | M2c | `profiler-accumulator` | Fold, grouping, turn deltas, anchor-delta attribution incl. multi-item apportioning (~500) | Fed the M1 captures, reproduces `analyse_capture.py`'s measured deltas (1,040 / 3,373 / 2,219 / 5,043); handles the interrupted turn's stranded items and the −192 boundary; **determinism suite passes** (findings §10.5, translated - see Fixtures) |
-| M2d | `profiler-classification` | Classification + unrecognised-fragment counter, estimator with `Reasoning` special-case, scrubber + committed fixtures (~400) | Category totals over the captures are sane; fixtures pass `assert_no_home_paths` |
+| M2d | `profiler-classification` | Content-kind classification with `PricingKind`, calibrated estimator (4.64 B/token, measured reasoning split), shared sizing helper (~600) | Category totals asserted exactly over the live-trace fixture with zero classification warnings; calibration regression within factor 2 |
 
 Ordering is dependency order, and deliberately puts the two exact, provable layers (adapter,
 accumulator) before the fuzzy one (classification, estimation) - a wrong number in M2d is then
@@ -1284,14 +1287,23 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
    token usage record to the rollout. If it anchors the way `EventMsg::TokenCount` does, M7
    hydration may get measured per-item costs for the replayed prefix too, not just the live
    suffix. Assess when M7 starts.
-5. **Unsizable items are silently zero** (M2d). Both the adapter and the profiler size an item
-   with `serde_json::to_vec(item).map(len).unwrap_or(0)`. Serialization of `ResponseItem` cannot
-   fail for today's types, and a panic in a diagnostic layer must never take the session down,
-   but a zero-byte item would take a zero share in apportioning - a quiet under-count. When M2d
-   adds classification diagnostics, size items through one shared helper and count failures next
-   to `classification_warning_count` so `/ctx` can say "n items could not be sized".
+5. **`ConfigurationUpdate` token cost.** `PricingKind::Ambiguous` until a capture shows how
+   `input_tokens` reflects it: core retains it only with harness provenance, and being serialized
+   into a request does not mean being tokenized by JSON size.
+6. **Three context-rewrite mechanisms, not two** (M5). Local summary compaction, remote summary
+   compaction, and the **fresh window**: the `new_context` tool or a token-budget rollover
+   (`core/src/compact_token_budget.rs`) installs a rebuilt initial context without summarizing. It
+   emits the `ContextCompaction` turn item with empty compaction metadata and no summarizing
+   `ResponseItem::Compaction`. M5 opens an epoch on the `ContextCompaction` boundary and never
+   infers the mechanism from the one case it previously knew; `replacement_history` from the
+   rollout is the only source of a fresh window's rebuilt items.
 
 ### Resolved since the first draft
+
+**Unsizable items are counted, not silently zero** (M2d): one shared `serialized_size` helper
+sizes items in both the adapter and the profiler; a failure records `0` bytes and increments
+`unsizable_item_count` so `/ctx` can say "n items could not be sized". Unreachable for today's
+types.
 
 **Profiler instances live in an `App`-owned registry**, not `ThreadSessionState`:
 

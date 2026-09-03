@@ -17,6 +17,11 @@
 use crate::item::Category;
 use crate::item::ContentPart;
 
+/// Serialized size of a value, or `None` if it cannot be serialized.
+pub fn serialized_size<T: serde::Serialize>(value: &T) -> Option<usize> {
+    serde_json::to_vec(value).ok().map(|json| json.len())
+}
+
 /// Bytes per 100 tokens: the median of the seven non-reasoning densities above, 4.64, held as an
 /// integer so the estimate is exact arithmetic rather than a float.
 const BYTES_PER_HUNDRED_TOKENS: i128 = 464;

@@ -80,5 +80,7 @@ pub struct ProfilerState {
     pub invalidated: Option<InvalidationReason>,
     /// Items with one or more classification uncertainties, counted at most once per item.
     pub classification_warning_count: u32,
+    /// Items whose serialized size could not be computed; unreachable for today's types.
+    pub unsizable_item_count: u32,
     pub anchors: Vec<UsageSnapshot>,
 }

@@ -11,6 +11,7 @@ mod profiler;
 mod snapshot;
 mod usage;
 
+pub use estimate::serialized_size;
 pub use event::InvalidationReason;
 pub use event::ProfilerEvent;
 pub use item::Category;
@@ -26,3 +27,7 @@ pub use snapshot::InitialContextSummary;
 pub use snapshot::ProfilerState;
 pub use snapshot::TurnDelta;
 pub use usage::UsageSnapshot;
+
+#[cfg(test)]
+#[path = "guard_tests.rs"]
+mod guard_tests;

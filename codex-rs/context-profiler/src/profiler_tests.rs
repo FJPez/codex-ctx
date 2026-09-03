@@ -268,6 +268,7 @@ fn single_turn_folds_items_anchor_and_turn_delta() {
         },
         invalidated: None,
         classification_warning_count: 0,
+        unsizable_item_count: 0,
         anchors: vec![usage],
     };
     assert_eq!(&expected, profiler.state());

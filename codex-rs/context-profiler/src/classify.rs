@@ -21,6 +21,7 @@ use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::TOOLS_OPEN_TAG;
 use codex_protocol::protocol::USER_INSTRUCTIONS_OPEN_TAG;
 
+use crate::estimate::serialized_size;
 use crate::item::Category;
 use crate::item::ContentPart;
 use crate::item::PricingKind;
@@ -75,7 +76,7 @@ pub(crate) fn classify(item: &ResponseItem) -> Classification {
             pricing,
             parts: vec![ContentPart {
                 kind: "configuration_update".to_string(),
-                bytes: serde_json::to_vec(item).map(|json| json.len()).unwrap_or(0),
+                bytes: serialized_size(item).unwrap_or(0),
                 category: Category::Other,
                 is_image: false,
             }],
@@ -175,9 +176,7 @@ fn message_parts(
         .enumerate()
         .map(|(index, entry)| ContentPart {
             kind: kinds.get(index).cloned().unwrap_or_default(),
-            bytes: serde_json::to_vec(entry)
-                .map(|json| json.len())
-                .unwrap_or(0),
+            bytes: serialized_size(entry).unwrap_or(0),
             category: entry_category(role, kinds.get(index).map(String::as_str), entry, warned),
             is_image: matches!(entry, ContentItem::InputImage { .. }),
         })

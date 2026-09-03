@@ -186,9 +186,12 @@ rollout.
 
 **Impact:** originally `CompactionKind { Remote, Unknown }`. **Superseded:** the design now drops
 compaction kind entirely from `ProfilerEvent` for M1-M4. An enum whose value is almost always
-`Unknown` earns nothing at the API boundary; the accumulator can infer `Remote` at M5 from an
-observed `ResponseItem::Compaction`, which is positive evidence rather than a default. Also raised
-the open question of whether M5 should read the rollout for compaction detail.
+`Unknown` earns nothing at the API boundary. An observed `ResponseItem::Compaction` is positive
+evidence of a summary compaction, but it is one mechanism of three: a fresh window (`new_context`
+or a token-budget rollover) emits `ContextCompaction` with no summarizing item at all, so M5 opens
+an epoch on the boundary and never infers the mechanism from the one case it knew (design open
+question 6). Also raised the open question of whether M5 should read the rollout for compaction
+detail.
 
 ---
 
