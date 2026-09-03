@@ -5,7 +5,7 @@
 //! expectation. Item payloads are padding: only the serialised length is faithful.
 
 use super::*;
-use crate::classify::classify;
+use crate::classify::Classification;
 use crate::estimate::text_tokens;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
@@ -225,7 +225,7 @@ fn fold(records: &[Record]) -> ContextProfiler {
 
 /// The initial estimate an item carries until an anchor prices it.
 fn estimated(item: &ResponseItem) -> TokenCost {
-    let classification = classify(item);
+    let classification = Classification::from_item(item);
     TokenCost::Estimated(item_tokens(
         classification.category,
         &classification.parts,

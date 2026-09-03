@@ -72,10 +72,40 @@ fn note(warnings: &mut Vec<ClassificationWarning>, warning: ClassificationWarnin
     }
 }
 
-pub(crate) fn classify(item: &ResponseItem) -> Classification {
+/// The message roles this crate distinguishes; the wire type is an open string, parsed once here
+/// so every later match is exhaustive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    User,
+    Developer,
+    Assistant,
+    System,
+    Unknown,
+}
+
+impl Role {
+    fn parse(role: &str) -> Self {
+        match role {
+            "user" => Self::User,
+            "developer" => Self::Developer,
+            "assistant" => Self::Assistant,
+            "system" => Self::System,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl Classification {
+    pub(crate) fn from_item(item: &ResponseItem) -> Self {
+        classify(item)
+    }
+}
+
+fn classify(item: &ResponseItem) -> Classification {
     let pricing = pricing_kind(item);
     match item {
         ResponseItem::Message { role, content, .. } => {
+            let role = Role::parse(role);
             let mut warnings = Vec::new();
             let parts = message_parts(item, role, content, &mut warnings);
             let category = match role_category(role, &mut warnings) {
@@ -133,11 +163,12 @@ pub(crate) fn classify(item: &ResponseItem) -> Classification {
 /// Which measured total may price an item; exhaustive so a new upstream variant fails the build.
 pub(crate) fn pricing_kind(item: &ResponseItem) -> PricingKind {
     match item {
-        ResponseItem::Message { role, .. } => match role.as_str() {
-            "user" | "developer" => PricingKind::Input,
-            "assistant" => PricingKind::Output,
-            // `system`, and any role we have never seen.
-            _ => PricingKind::Ambiguous,
+        ResponseItem::Message { role, .. } => match Role::parse(role) {
+            Role::User | Role::Developer => PricingKind::Input,
+            Role::Assistant => PricingKind::Output,
+            // Core drops raw system messages after the raw-stream clone; unknown roles could go
+            // either way.
+            Role::System | Role::Unknown => PricingKind::Ambiguous,
         },
         ResponseItem::FunctionCallOutput { .. }
         | ResponseItem::CustomToolCallOutput { .. }
@@ -187,7 +218,7 @@ fn structural_category(item: &ResponseItem) -> Category {
 /// long kind array cannot silently shift every later entry's classification.
 fn message_parts(
     item: &ResponseItem,
-    role: &str,
+    role: Role,
     content: &[ContentItem],
     warnings: &mut Vec<ClassificationWarning>,
 ) -> Vec<ContentPart> {
@@ -217,12 +248,12 @@ fn part_media(entry: &ContentItem) -> PartMedia {
 
 /// Roles whose category does not depend on their entries, decided before any entry is examined so
 /// an empty message is classified and an unknown role is warned about regardless of content.
-fn role_category(role: &str, warnings: &mut Vec<ClassificationWarning>) -> Option<Category> {
+fn role_category(role: Role, warnings: &mut Vec<ClassificationWarning>) -> Option<Category> {
     match role {
-        "assistant" => Some(Category::AgentMessage),
-        "system" => Some(Category::Instructions),
-        "user" | "developer" => None,
-        _ => {
+        Role::Assistant => Some(Category::AgentMessage),
+        Role::System => Some(Category::Instructions),
+        Role::User | Role::Developer => None,
+        Role::Unknown => {
             note(warnings, ClassificationWarning::UnknownRole);
             Some(Category::Other)
         }
@@ -230,8 +261,8 @@ fn role_category(role: &str, warnings: &mut Vec<ClassificationWarning>) -> Optio
 }
 
 /// Only user-role messages carry meaningful kinds; core stamps `unknown` on everything else.
-fn role_consults_kinds(role: &str) -> bool {
-    matches!(role, "user" | "developer")
+fn role_consults_kinds(role: Role) -> bool {
+    matches!(role, Role::User | Role::Developer)
 }
 
 fn content_item_kinds(item: &ResponseItem) -> Vec<String> {
@@ -251,15 +282,15 @@ fn content_item_kinds(item: &ResponseItem) -> Vec<String> {
 }
 
 fn entry_category(
-    role: &str,
+    role: Role,
     kind: Option<&str>,
     entry: &ContentItem,
     warnings: &mut Vec<ClassificationWarning>,
 ) -> Category {
     match role {
-        "assistant" => Category::AgentMessage,
-        "system" => Category::Instructions,
-        "user" | "developer" => match kind {
+        Role::Assistant => Category::AgentMessage,
+        Role::System => Category::Instructions,
+        Role::User | Role::Developer => match kind {
             Some(kind) if kind.starts_with(USER_KIND_PREFIX) => Category::UserMessage,
             Some(COMPACTION_SUMMARY_KIND) => Category::Compaction,
             Some(kind) if !kind.is_empty() && kind != UNKNOWN_KIND => Category::Instructions,
@@ -268,7 +299,7 @@ fn entry_category(
                 tagged_fallback(entry)
             }
         },
-        _ => {
+        Role::Unknown => {
             note(warnings, ClassificationWarning::UnknownRole);
             Category::Other
         }

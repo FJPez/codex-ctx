@@ -1,5 +1,5 @@
 use super::*;
-use crate::classify::classify;
+use crate::classify::Classification;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
@@ -67,7 +67,7 @@ fn an_image_entry_takes_the_flat_estimate_and_its_siblings_do_not() {
         }),
     };
 
-    let classification = classify(&item);
+    let classification = Classification::from_item(&item);
     let bytes = serde_json::to_vec(&item).expect("serializable item").len();
     let parts = &classification.parts;
     assert_eq!(

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
-use crate::classify::classify;
+use crate::classify::Classification;
 use crate::estimate::item_tokens;
 use crate::estimate::serialized_size;
 use crate::event::InvalidationReason;
@@ -85,7 +85,7 @@ impl ContextProfiler {
                     Some(call_id) => GroupKey::ToolCall(call_id),
                     None => GroupKey::Ungrouped(seq),
                 };
-                let classification = classify(item);
+                let classification = Classification::from_item(item);
                 if classification.warned() {
                     self.state.classification_warning_count += 1;
                 }

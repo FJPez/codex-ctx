@@ -298,7 +298,7 @@ fn the_kind_table_decides_the_category() {
     let actual: Vec<(Category, bool)> = rows
         .iter()
         .map(|(item, _, _)| {
-            let classification = classify(item);
+            let classification = Classification::from_item(item);
             (classification.category, classification.warned())
         })
         .collect();
@@ -312,7 +312,7 @@ fn kinds_are_looked_up_by_index_never_zipped() {
         vec![text("<user_instructions>do this"), text("and this")],
         Some(&["agents_md.instructions"]),
     );
-    let classification = classify(&short);
+    let classification = Classification::from_item(&short);
     assert_eq!(
         vec![Category::Instructions, Category::UserMessage],
         classification
@@ -336,7 +336,7 @@ fn kinds_are_looked_up_by_index_never_zipped() {
         vec![text("hello")],
         Some(&["user.text", "agents_md.instructions"]),
     );
-    let classification = classify(&long);
+    let classification = Classification::from_item(&long);
     assert_eq!(Category::UserMessage, classification.category);
     assert_eq!(1, classification.parts.len());
     assert!(classification.warned());
@@ -351,8 +351,8 @@ fn an_untagged_message_falls_back_to_the_open_tag_marker() {
     );
     let plain = message("user", vec![text("just a question")], None);
 
-    let tagged = classify(&tagged);
-    let plain = classify(&plain);
+    let tagged = Classification::from_item(&tagged);
+    let plain = Classification::from_item(&plain);
     assert_eq!(
         (Category::Instructions, true),
         (tagged.category, tagged.warned())
@@ -371,7 +371,7 @@ fn a_merged_fragment_message_keeps_one_category_but_a_mixed_one_does_not() {
         entries.clone(),
         Some(&["agents_md.instructions", "environments.environment_context"]),
     );
-    let classification = classify(&merged);
+    let classification = Classification::from_item(&merged);
     assert_eq!(Category::Instructions, classification.category);
     assert!(!classification.warned());
     assert_eq!(
@@ -391,7 +391,7 @@ fn a_merged_fragment_message_keeps_one_category_but_a_mixed_one_does_not() {
         vec![text("hello"), text("AGENTS.md says")],
         Some(&["user.text", "agents_md.instructions"]),
     );
-    let classification = classify(&mixed);
+    let classification = Classification::from_item(&mixed);
     assert_eq!(Category::Other, classification.category);
     assert!(classification.warned());
 }
@@ -399,7 +399,7 @@ fn a_merged_fragment_message_keeps_one_category_but_a_mixed_one_does_not() {
 #[test]
 fn a_configuration_update_is_one_ambiguous_part() {
     let item = configuration_update();
-    let classification = classify(&item);
+    let classification = Classification::from_item(&item);
 
     assert_eq!(Category::Other, classification.category);
     assert_eq!(PricingKind::Ambiguous, classification.pricing);
@@ -417,26 +417,26 @@ fn a_configuration_update_is_one_ambiguous_part() {
 /// An item type this build cannot name is worth a warning; known control items are not.
 #[test]
 fn an_unknown_item_type_warns_but_known_controls_do_not() {
-    let unknown = classify(&ResponseItem::Other);
+    let unknown = Classification::from_item(&ResponseItem::Other);
     assert_eq!(Category::Other, unknown.category);
     assert_eq!(PricingKind::Ambiguous, unknown.pricing);
     assert!(unknown.warned());
 
-    assert!(!classify(&configuration_update()).warned());
-    assert!(!classify(&ResponseItem::CompactionTrigger {}).warned());
+    assert!(!Classification::from_item(&configuration_update()).warned());
+    assert!(!Classification::from_item(&ResponseItem::CompactionTrigger {}).warned());
 }
 
 /// Warnings name their reason, each at most once however many entries raised it.
 #[test]
 fn warnings_carry_their_reason_once() {
-    let mixed = classify(&message(
+    let mixed = Classification::from_item(&message(
         "user",
         vec![text("hi"), text("<user_instructions>x")],
         Some(&["user.text", "agents_md.instructions"]),
     ));
     assert_eq!(vec![ClassificationWarning::MixedCategories], mixed.warnings);
 
-    let short = classify(&message(
+    let short = Classification::from_item(&message(
         "user",
         vec![text("a"), text("b")],
         Some(&["user.text"]),
@@ -449,7 +449,8 @@ fn warnings_carry_their_reason_once() {
         short.warnings
     );
 
-    let unknown = classify(&message("future_role", vec![text("a"), text("b")], None));
+    let unknown =
+        Classification::from_item(&message("future_role", vec![text("a"), text("b")], None));
     assert_eq!(vec![ClassificationWarning::UnknownRole], unknown.warnings);
 }
 
@@ -462,7 +463,7 @@ fn audio_entries_are_marked_as_audio() {
         }],
         Some(&["user.audio"]),
     );
-    let classification = classify(&item);
+    let classification = Classification::from_item(&item);
     assert_eq!(PartMedia::Audio, classification.parts[0].media);
     assert_eq!(Category::UserMessage, classification.category);
 }
@@ -478,7 +479,7 @@ fn empty_messages_classify_by_role() {
         ("future_role", Category::Other, true),
     ];
     for (role, category, warned) in cases {
-        let classification = classify(&message(role, Vec::new(), None));
+        let classification = Classification::from_item(&message(role, Vec::new(), None));
         assert_eq!(category, classification.category, "{role}");
         assert_eq!(warned, classification.warned(), "{role}");
         assert!(classification.parts.is_empty(), "{role}");
