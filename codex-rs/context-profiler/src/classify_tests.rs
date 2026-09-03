@@ -413,3 +413,21 @@ fn a_configuration_update_is_one_ambiguous_part() {
         classification.parts
     );
 }
+
+/// The role decides before any entry is examined, so an empty message is still classified and an
+/// unknown role still warns.
+#[test]
+fn empty_messages_classify_by_role() {
+    let cases = [
+        ("assistant", Category::AgentMessage, false),
+        ("system", Category::Instructions, false),
+        ("user", Category::Other, false),
+        ("future_role", Category::Other, true),
+    ];
+    for (role, category, warned) in cases {
+        let classification = classify(&message(role, Vec::new(), None));
+        assert_eq!(category, classification.category, "{role}");
+        assert_eq!(warned, classification.warned, "{role}");
+        assert!(classification.parts.is_empty(), "{role}");
+    }
+}

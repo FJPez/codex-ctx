@@ -77,13 +77,10 @@ impl ContextProfiler {
                 let turn_index = self.turn_index(turn_id);
                 self.items_seen += 1;
                 let seq = self.items_seen;
-                let bytes = match serialized_size(item) {
-                    Some(bytes) => bytes,
-                    None => {
-                        self.state.unsizable_item_count += 1;
-                        0
-                    }
-                };
+                let size = serialized_size(item);
+                if size.is_none() {
+                    self.state.unsizable_item_count += 1;
+                }
                 let group = match call_id(item) {
                     Some(call_id) => GroupKey::ToolCall(call_id),
                     None => GroupKey::Ungrouped(seq),
@@ -92,17 +89,16 @@ impl ContextProfiler {
                 if classification.warned {
                     self.state.classification_warning_count += 1;
                 }
+                let estimate = size.map_or(0, |bytes| {
+                    item_tokens(classification.category, &classification.parts, bytes)
+                });
                 self.state.snapshot.items.push(ItemSummary {
                     seq,
                     turn_index,
                     category: classification.category,
                     pricing: classification.pricing,
-                    bytes,
-                    cost: TokenCost::Estimated(item_tokens(
-                        classification.category,
-                        &classification.parts,
-                        bytes,
-                    )),
+                    bytes: size.unwrap_or(0),
+                    cost: TokenCost::Estimated(estimate),
                     label: item_kind(item).to_string(),
                     group,
                     item_id: item.id().map(ToString::to_string),

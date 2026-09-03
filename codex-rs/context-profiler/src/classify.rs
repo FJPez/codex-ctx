@@ -63,7 +63,10 @@ pub(crate) fn classify(item: &ResponseItem) -> Classification {
         ResponseItem::Message { role, content, .. } => {
             let mut warned = false;
             let parts = message_parts(item, role, content, &mut warned);
-            let category = merge_categories(&parts, &mut warned);
+            let category = match role_category(role, &mut warned) {
+                Some(category) => category,
+                None => merge_categories(&parts, &mut warned),
+            };
             Classification {
                 category,
                 pricing,
@@ -181,6 +184,20 @@ fn message_parts(
             is_image: matches!(entry, ContentItem::InputImage { .. }),
         })
         .collect()
+}
+
+/// Roles whose category does not depend on their entries, decided before any entry is examined so
+/// an empty message is classified and an unknown role is warned about regardless of content.
+fn role_category(role: &str, warned: &mut bool) -> Option<Category> {
+    match role {
+        "assistant" => Some(Category::AgentMessage),
+        "system" => Some(Category::Instructions),
+        "user" | "developer" => None,
+        _ => {
+            *warned = true;
+            Some(Category::Other)
+        }
+    }
 }
 
 /// Only user-role messages carry meaningful kinds; core stamps `unknown` on everything else.

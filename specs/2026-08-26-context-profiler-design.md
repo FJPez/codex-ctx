@@ -594,6 +594,17 @@ if an attribution span contains an `Ambiguous` item, the whole span keeps its in
 neither measured total can be divided when part of the span may have landed in the other one - but
 the anchor is still recorded and still closes the span, so the following span prices normally.
 
+**Why `system` is `Ambiguous` rather than `Input`.** System messages may appear on the raw
+observation stream: `record_prepared_conversation_items` (`core/src/session/mod.rs`) clones the
+items for the raw stream before history filtering. Core then removes them before retaining
+request history - `is_api_message` (`core/src/context_manager/history.rs`) returns false for
+`role == "system"`, "raw system messages are never retained". A system message therefore
+contributes nothing to the next request and must not share the input delta; pricing it `Input`
+would hand it tokens that belong to its neighbours. M2d uses `Ambiguous` because the three-way
+model has no known-zero variant. A non-tainting `Exact(0)` pricing kind - one that lets the rest
+of the span price normally - is deliberately deferred until this shape is observed in a capture
+or becomes materially useful.
+
 > Upstream sync check: Inspect newly added ContentItemKind families. Existing members covered by
 > user.*, compaction.summary, and the default instruction rule require no code change. Update the
 > classifier only when a new family has different display or pricing semantics.
