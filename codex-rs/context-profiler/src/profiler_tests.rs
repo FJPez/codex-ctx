@@ -1,5 +1,5 @@
 use super::*;
-use crate::classify::Classification;
+use crate::classify::classify;
 use crate::event::InvalidationReason;
 use crate::snapshot::ContextSnapshot;
 use crate::usage::UsageSnapshot;
@@ -173,7 +173,7 @@ fn item_bytes(item: &ResponseItem) -> usize {
 
 /// The initial estimate an item carries until an anchor prices it.
 fn item_cost(item: &ResponseItem) -> TokenCost {
-    let classification = Classification::from_item(item);
+    let classification = classify(item);
     TokenCost::Estimated(item_tokens(
         classification.category,
         &classification.parts,
@@ -187,7 +187,7 @@ fn weights(items: &[&ResponseItem]) -> Vec<i64> {
 }
 
 fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> ItemSummary {
-    let classification = Classification::from_item(item);
+    let classification = classify(item);
     ItemSummary {
         seq,
         turn_index,

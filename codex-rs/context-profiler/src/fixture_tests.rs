@@ -2,10 +2,10 @@
 //!
 //! Every byte size and every anchor number below is transcribed from a real capture, so a change in
 //! attribution shows up as a disagreement with measured reality rather than with a hand-written
-//! expectation. Item payloads are padding: only the serialised length is faithful.
+//! expectation. Item payloads are padding: only the serialized length is faithful.
 
 use super::*;
-use crate::classify::Classification;
+use crate::classify::classify;
 use crate::estimate::text_tokens;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
@@ -116,7 +116,7 @@ fn serialized_len(item: &ResponseItem) -> usize {
     serde_json::to_vec(item).expect("serializable item").len()
 }
 
-/// Builds an item whose serialised length is exactly `bytes`, by padding its string payload.
+/// Builds an item whose serialized length is exactly `bytes`, by padding its string payload.
 ///
 /// The padding is unescaped ASCII, so one character costs one byte and the arithmetic is exact.
 fn sized(kind: Kind, bytes: usize) -> ResponseItem {
@@ -225,7 +225,7 @@ fn fold(records: &[Record]) -> ContextProfiler {
 
 /// The initial estimate an item carries until an anchor prices it.
 fn estimated(item: &ResponseItem) -> TokenCost {
-    let classification = Classification::from_item(item);
+    let classification = classify(item);
     TokenCost::Estimated(item_tokens(
         classification.category,
         &classification.parts,

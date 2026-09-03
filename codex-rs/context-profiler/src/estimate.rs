@@ -1,6 +1,6 @@
 //! Byte-to-token estimation for items no measured total has priced yet.
 //!
-//! Calibrated against the Spike C captures, where the bytes are the serialised JSON sizes the
+//! Calibrated against the Spike C captures, where the bytes are the serialized JSON sizes the
 //! profiler itself measures and the tokens are provider-reported:
 //!
 //! | what | bytes | tokens | bytes/token |

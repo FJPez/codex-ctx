@@ -72,8 +72,8 @@ fn note(warnings: &mut Vec<ClassificationWarning>, warning: ClassificationWarnin
     }
 }
 
-/// The message roles this crate distinguishes; the wire type is an open string, parsed once here
-/// so every later match is exhaustive.
+/// The message roles this crate distinguishes; the wire type is an open string, normalized
+/// centrally so every match on it is exhaustive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     User,
@@ -95,13 +95,7 @@ impl Role {
     }
 }
 
-impl Classification {
-    pub(crate) fn from_item(item: &ResponseItem) -> Self {
-        classify(item)
-    }
-}
-
-fn classify(item: &ResponseItem) -> Classification {
+pub(crate) fn classify(item: &ResponseItem) -> Classification {
     let pricing = pricing_kind(item);
     match item {
         ResponseItem::Message { role, content, .. } => {
@@ -246,8 +240,8 @@ fn part_media(entry: &ContentItem) -> PartMedia {
     }
 }
 
-/// Roles whose category does not depend on their entries, decided before any entry is examined so
-/// an empty message is classified and an unknown role is warned about regardless of content.
+/// Roles whose category is independent of their entries, so an empty message is still classified
+/// and an unknown role is warned about regardless of content.
 fn role_category(role: Role, warnings: &mut Vec<ClassificationWarning>) -> Option<Category> {
     match role {
         Role::Assistant => Some(Category::AgentMessage),

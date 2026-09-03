@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
-use crate::classify::Classification;
+use crate::classify::classify;
 use crate::estimate::item_tokens;
 use crate::estimate::serialized_size;
 use crate::event::InvalidationReason;
@@ -85,7 +85,7 @@ impl ContextProfiler {
                     Some(call_id) => GroupKey::ToolCall(call_id),
                     None => GroupKey::Ungrouped(seq),
                 };
-                let classification = Classification::from_item(item);
+                let classification = classify(item);
                 if classification.warned() {
                     self.state.classification_warning_count += 1;
                 }
@@ -178,7 +178,7 @@ impl ContextProfiler {
     ///
     /// Output-kind items are priced at every anchor, since `output_tokens` is an absolute. Input-kind
     /// items need a pair of same-turn anchors, because only a delta reveals what the next request
-    /// serialised. Items left over when a turn closes keep their estimates forever.
+    /// serialized. Items left over when a turn closes keep their estimates forever.
     ///
     /// `reasoning_output_tokens` is a documented subset of `output_tokens` (the API's
     /// `output_tokens_details.reasoning_tokens`), so the output pass splits in two: reasoning items
