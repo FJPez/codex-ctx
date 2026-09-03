@@ -209,6 +209,7 @@ pub(crate) use chat_composer_history::HistoryEntry;
 
 use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::status_indicator_widget::StatusIndicatorWidget;
+#[cfg(test)]
 pub(crate) use experimental_features_view::ExperimentalFeatureItem;
 pub(crate) use experimental_features_view::ExperimentalFeaturesView;
 pub(crate) use list_selection_view::SELECTION_TOGGLE_BLOCKED_PREFIX;
@@ -873,10 +874,10 @@ impl BottomPane {
     }
 
     fn schedule_active_view_frame(&self) {
-        if let Some(delay) = self
-            .active_view()
-            .and_then(BottomPaneView::next_frame_delay)
-        {
+        if let Some(delay) = self.active_view().map_or_else(
+            || self.composer.footer_flash_delay(),
+            BottomPaneView::next_frame_delay,
+        ) {
             self.request_redraw_in(delay);
         }
     }

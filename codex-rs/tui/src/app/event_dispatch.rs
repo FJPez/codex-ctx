@@ -63,6 +63,13 @@ impl App {
         }
 
         match event {
+            AppEvent::ReviewMisalignment(review) => {
+                self.open_misalignment_review(tui, review);
+            }
+            AppEvent::ContinueMisalignment(review) => {
+                self.continue_misalignment(app_server, review).await;
+            }
+            AppEvent::CloseMisalignmentReview => self.chat_widget.show_misalignment_policy_precaution(),
             AppEvent::SkillsListLoaded { ref cwd, .. }
             | AppEvent::PluginMentionsLoaded { ref cwd, .. }
                 if cwds_differ(cwd, self.config.cwd.as_path()) => {}
@@ -232,61 +239,7 @@ impl App {
                 .await;
             }
             AppEvent::OpenResumePicker => {
-                let picker_app_server = match crate::start_app_server_for_picker(
-                    &self.config,
-                    &self.app_server_target,
-                    self.state_db.clone(),
-                    self.environment_manager.clone(),
-                )
-                .await
-                {
-                    Ok(app_server) => app_server,
-                    Err(err) => {
-                        self.chat_widget.add_error_message(format!(
-                            "Failed to start TUI session picker: {err}"
-                        ));
-                        self.chat_widget.maybe_send_next_queued_input();
-                        return Ok(AppRunControl::Continue);
-                    }
-                };
-                match crate::resume_picker::run_resume_picker_from_existing_session_with_app_server(
-                    tui,
-                    &self.config,
-                    &self.local_settings,
-                    /*show_all*/ false,
-                    /*include_non_interactive*/ false,
-                    picker_app_server,
-                    app_server.request_handle(),
-                    self.primary_thread_id
-                        .or(self.current_displayed_thread_id()),
-                )
-                .await?
-                {
-                    SessionSelection::Resume(target_session) => {
-                        match self
-                            .resume_target_session(tui, app_server, target_session)
-                            .await?
-                        {
-                            AppRunControl::Continue => {}
-                            AppRunControl::Exit(reason) => {
-                                return Ok(AppRunControl::Exit(reason));
-                            }
-                        }
-                    }
-                    SessionSelection::Exit
-                    | SessionSelection::StartFresh
-                    | SessionSelection::AgentsOverview => {
-                        self.refresh_in_memory_config_from_disk_best_effort(
-                            "closing the session picker",
-                        )
-                        .await;
-                    }
-                    SessionSelection::Fork(_) => {}
-                }
-
-                self.chat_widget.maybe_send_next_queued_input();
-                // Leaving alt-screen may blank the inline viewport; force a redraw either way.
-                tui.frame_requester().schedule_frame();
+                return Box::pin(self.open_resume_picker(tui, app_server)).await;
             }
             AppEvent::OpenExternalAgentConfigMigration => {
                 match crate::external_agent_config_migration::flow::handle_external_agent_config_migration_prompt(
@@ -1620,6 +1573,20 @@ impl App {
                     }
                 }
             }
+            AppEvent::FetchPermissionProfiles { request_id, thread_cwd } => {
+                if self.chat_widget.permission_popup_request_is_current(request_id) {
+                    crate::permission_discovery::fetch(
+                        app_server,
+                        request_id,
+                        self.chat_widget.config_ref(),
+                        thread_cwd.as_deref(),
+                        self.app_event_tx.clone(),
+                    );
+                }
+            }
+            AppEvent::PermissionProfilesLoaded { request_id, result } => {
+                self.chat_widget.on_permission_profiles_loaded(request_id, result);
+            }
             AppEvent::FetchModels { request_id } => {
                 if self.chat_widget.model_popup_request_is_current(request_id) {
                     app_server.fetch_models(request_id, self.app_event_tx.clone());
@@ -2430,6 +2397,13 @@ impl App {
                         .add_error_message(format!("Failed to save approvals reviewer: {err}"));
                 }
             }
+            AppEvent::FetchExperimentalFeatures { thread_id, response_tx } => {
+                crate::experimental_features::fetch(
+                    app_server.request_handle(),
+                    thread_id,
+                    response_tx,
+                );
+            }
             AppEvent::UpdateFeatureFlags { updates } => {
                 self.update_feature_flags(app_server, updates).await;
             }
@@ -2537,9 +2511,6 @@ impl App {
                     ));
                 }
             }
-            AppEvent::OpenApprovalsPopup => {
-                self.chat_widget.open_approvals_popup();
-            }
             AppEvent::OpenAgentsOverview => {
                 self.open_agents_overview(app_server);
             }
@@ -2640,11 +2611,11 @@ impl App {
                 self.stop_agents_overview_thread(app_server, thread_id)
                     .await;
             }
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             AppEvent::StartAgentsDaemon => {
                 self.start_agents_daemon();
             }
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             AppEvent::AgentsDaemonStarted { result } => match result {
                 Ok(()) => self.chat_widget.add_info_message(
                     "Background server started. Run `codex agents` in another terminal; this session remains unchanged."
@@ -2775,8 +2746,12 @@ impl App {
                     self.chat_widget.add_error_message(err);
                 }
             }
-            AppEvent::OpenPermissionsPopup => {
-                self.chat_widget.open_permissions_popup();
+            AppEvent::OpenPermissionsPopup | AppEvent::OpenApprovalsPopup => {
+                if app_server.uses_remote_workspace() {
+                    self.chat_widget.request_permission_profiles();
+                } else {
+                    self.chat_widget.open_approvals_popup();
+                }
             }
             AppEvent::OpenReviewBranchPicker(cwd) => {
                 self.chat_widget.show_review_branch_picker(&cwd).await;

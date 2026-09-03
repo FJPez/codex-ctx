@@ -447,6 +447,7 @@ impl App {
                 (session, turns, false)
             }
         };
+        self.agents_overview.activity.remove(&thread_id);
         let recap_progress =
             if live_attached && let Some(channel) = self.thread_event_channels.remove(&thread_id) {
                 let store = channel.store.lock().await;
@@ -702,6 +703,7 @@ impl App {
     pub(super) fn reset_thread_event_state(&mut self) {
         self.abort_all_thread_event_listeners();
         self.thread_event_channels.clear();
+        self.agents_overview.activity.clear();
         self.agent_navigation.clear();
         self.side_threads.clear();
         self.active_thread_id = None;
@@ -1160,7 +1162,7 @@ impl App {
                         .await;
                     }
                     Err(err) => {
-                        self.chat_widget.add_error_message(format!(
+                        self.add_session_picker_error(format!(
                             "Failed to attach to resumed app-server thread: {err}"
                         ));
                     }
@@ -1168,7 +1170,7 @@ impl App {
             }
             Err(err) => {
                 let path_display = target_session.display_label();
-                self.chat_widget.add_error_message(format!(
+                self.add_session_picker_error(format!(
                     "Failed to resume session from {path_display}: {err}"
                 ));
             }

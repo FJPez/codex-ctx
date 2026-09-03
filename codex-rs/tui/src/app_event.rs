@@ -218,12 +218,16 @@ pub(crate) enum RecapTrigger {
 #[derive(Debug)]
 pub(crate) struct AgentsOverviewThreadRefresh {
     pub(crate) threads: std::collections::HashMap<ThreadId, Option<Thread>>,
+    pub(crate) last_messages: std::collections::HashMap<ThreadId, String>,
     pub(crate) recent_seed_complete: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    ReviewMisalignment(Arc<crate::chatwidget::MisalignmentReview>),
+    ContinueMisalignment(Arc<crate::chatwidget::MisalignmentReview>),
+    CloseMisalignmentReview,
     /// Open the daemon-wide overview of recent and locally retained root sessions.
     OpenAgentsOverview,
     /// Update the daemon-wide overview after a background thread listing finishes.
@@ -270,10 +274,10 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
     },
     /// Start the shared app-server daemon without moving the current embedded session.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     StartAgentsDaemon,
     /// Report whether starting the shared app-server daemon succeeded.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     AgentsDaemonStarted {
         result: Result<(), String>,
     },
@@ -1023,6 +1027,15 @@ pub(crate) enum AppEvent {
         result: Result<Vec<ModelPreset>, String>,
     },
 
+    FetchPermissionProfiles {
+        request_id: uuid::Uuid,
+        thread_cwd: Option<PathBuf>,
+    },
+    PermissionProfilesLoaded {
+        request_id: uuid::Uuid,
+        result: Result<crate::permission_discovery::PermissionDiscovery, String>,
+    },
+
     /// Open the reasoning selection popup after picking a model.
     OpenReasoningPopup {
         model: ModelPreset,
@@ -1144,6 +1157,14 @@ pub(crate) enum AppEvent {
 
     /// Update the current approvals reviewer in the running app and widget.
     UpdateApprovalsReviewer(ApprovalsReviewer),
+
+    /// Discover experimental features for the requesting popup only.
+    FetchExperimentalFeatures {
+        thread_id: ThreadId,
+        response_tx: tokio::sync::oneshot::Sender<
+            Result<Vec<codex_app_server_protocol::ExperimentalFeature>, String>,
+        >,
+    },
 
     /// Update feature flags and persist them to the top-level config.
     UpdateFeatureFlags {

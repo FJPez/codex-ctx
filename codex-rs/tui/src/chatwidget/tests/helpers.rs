@@ -140,9 +140,12 @@ pub(super) fn test_session_telemetry(config: &Config, model: &str) -> SessionTel
 }
 
 pub(super) fn test_model_catalog(_config: &Config) -> Arc<ModelCatalog> {
-    Arc::new(ModelCatalog::new(
-        crate::test_support::TEST_MODEL_PRESETS.clone(),
-    ))
+    Arc::new(
+        ModelCatalog::new(crate::test_support::TEST_MODEL_PRESETS.clone())
+            .with_collaboration_modes(
+            codex_models_manager::collaboration_mode_presets::builtin_collaboration_mode_presets(),
+        ),
+    )
 }
 
 // --- Helpers for tests that need direct construction and event draining ---
@@ -309,7 +312,7 @@ pub(crate) fn set_fast_mode_test_catalog(chat: &mut ChatWidget) {
     .map(Into::into)
     .collect();
 
-    chat.model_catalog = Arc::new(ModelCatalog::new(models));
+    Arc::make_mut(&mut chat.model_catalog).models = models;
 }
 
 pub(crate) async fn make_chatwidget_manual_with_sender() -> (
@@ -937,6 +940,7 @@ pub(super) fn complete_assistant_message(
 
 pub(super) fn pending_steer(text: &str) -> PendingSteer {
     PendingSteer {
+        client_id: "test-submission".to_string(),
         user_message: UserMessage::from(text),
         history_record: UserMessageHistoryRecord::UserMessageText,
         compare_key: PendingSteerCompareKey {

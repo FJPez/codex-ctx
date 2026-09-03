@@ -25,7 +25,7 @@ Supported transports:
 
 - stdio (`--stdio` or `--listen stdio://`, default): newline-delimited JSON (JSONL)
 - websocket (`--listen ws://IP:PORT`): one JSON-RPC message per websocket text frame (**experimental / unsupported**)
-- unix socket (`--listen unix://` or `--listen unix://PATH`): websocket connections over `$CODEX_HOME/app-server-control/app-server-control.sock` or a custom socket path, using the standard HTTP Upgrade handshake
+- unix socket (`--listen unix://` or `--listen unix://PATH`): websocket connections over `$CODEX_HOME/app-server-control/app-server-control.sock` or a custom socket path, using the standard HTTP Upgrade handshake (also supported on Windows)
 - off (`--listen off`): do not expose a local transport
 
 When running with `--listen ws://IP:PORT`, the same listener also serves basic HTTP health probes:
@@ -47,6 +47,10 @@ On Windows, the socket directory is created with a protected current-user-only D
 directories must already have that owner and DACL; startup rejects broader permissions rather
 than attempting to repair previously exposed state. Custom sockets should use a new dedicated
 subdirectory. The listener pins the validated directory until socket cleanup completes.
+
+`codex app-server daemon` manages this local server on Unix and Windows using the standalone
+installation. The TUI discovers an available local daemon; `codex agents` starts it when no explicit
+remote endpoint is supplied. See [daemon lifecycle](../app-server-daemon/README.md) for commands and platform requirements.
 
 Tracing/log output:
 
@@ -318,6 +322,20 @@ metadata in `data._meta`. Other operation failures retain the existing
 internal-error response. Tool results with `isError: true` remain results,
 including their `_meta`.
 
+### Application requirements
+
+With experimental API support enabled, `configRequirements/read` returns
+`application.network` from managed requirements, separately from agent-network
+policy in `network`. This endpoint reports policy; it does not enforce it.
+
+```toml
+[application.network.domains]
+"managed.example.com" = "allow"
+```
+
+Application rules use normal managed TOML precedence. A present network block
+is enabled by default and denies unlisted domains; `enabled = false` disables it.
+
 ### Plugin configuration scope
 
 Plugin activation and MCP settings use the existing merged configuration, including
@@ -369,6 +387,13 @@ Use `thread/read` or `thread/list` to inspect them without resuming a thread,
 subscribing to it, or dispatching queued work or goal continuations.
 
 Start a fresh thread when you need a new Codex conversation.
+
+Experimental `Thread.environments` returns a loaded thread's current selection as `{ environmentId, cwd, runtimeWorkspaceRoots }` entries.
+The first entry is the primary environment; paths use that environment's native syntax.
+An empty list means no environments are selected; `null` means the thread is not loaded or the server does not expose its selection.
+Start and resume responses report the resulting live selection, and read, list, and unarchive responses include it for loaded threads, even if the client missed `thread/environment/connected`.
+The field is not persisted and does not change executor selection or resume behavior.
+Reading an unloaded thread leaves it unloaded and returns `null`; use `environment/status` to check connection status separately.
 
 ```json
 { "method": "thread/start", "id": 10, "params": {
@@ -538,6 +563,7 @@ Pass any combination of:
 - `sortDirection` — `desc` (default for timestamp sorts) or `asc` (default for `section_position`).
 - `modelProviders` — restrict results to specific providers; unset, null, or an empty array will include all providers.
 - `sourceKinds` — restrict results to specific sources; omit or pass `[]` for interactive sessions only (`cli`, `vscode`).
+- `originators` — an exact-value allowlist for hosted backends that support originator filtering. The local app-server rejects a nonempty list; omission, `null`, and `[]` leave originators unrestricted.
 - `archived` — when `true`, list archived threads only. When `false` or `null`, list non-archived threads (default).
 - `sectionId` — provide an ID from `threadSection/list` to return threads from that section; pass `null` to return only threads without a section; or omit it to include threads from every section and threads without a section.
 - `cwd` — restrict results to threads whose session cwd exactly matches this path, or one of these paths when an array is provided. Relative paths are resolved against the app-server process cwd before matching.
@@ -545,6 +571,7 @@ Pass any combination of:
 - `searchTerm` — restrict results to threads whose extracted title contains this substring (case-sensitive).
 - Responses include `nextCursor` to continue in the same direction and `backwardsCursor` to pass as `cursor` when reversing `sortDirection`.
 - Responses include `agentNickname` and `agentRole` for AgentControl-spawned thread sub-agents when available.
+- Full thread responses and `thread/started` include `originator`, the value recorded at creation, or `null` when unavailable. Opening or resuming a thread does not attribute it to the current client. This is separate from the runtime `source` and does not choose an executor.
 
 Example:
 

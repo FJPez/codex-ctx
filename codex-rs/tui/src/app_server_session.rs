@@ -8,6 +8,10 @@ mod history;
 mod models;
 mod rollout_history;
 
+#[cfg(test)]
+#[path = "app_server_session/collaboration_catalog_tests.rs"]
+mod collaboration_catalog_tests;
+
 pub(crate) use history::HISTORY_ITEM_PAGE_LIMIT;
 pub(crate) use history::HISTORY_ITEM_SCAN_LIMIT;
 pub(crate) use history::HistoryHydrationScope;
@@ -291,6 +295,7 @@ pub(crate) struct AppServerBootstrap {
     pub(crate) feedback_audience: FeedbackAudience,
     pub(crate) has_chatgpt_account: bool,
     pub(crate) available_models: Vec<ModelPreset>,
+    pub(crate) collaboration_modes: Vec<codex_protocol::config_types::CollaborationModeMask>,
 }
 
 pub(crate) struct AppServerSession {
@@ -568,7 +573,7 @@ impl AppServerSession {
         // requirements together so an uncached model fetch can overlap both config requests.
         let model_request_id = self.next_request_id();
         let requirements_request_id = self.next_request_id();
-        let (models, requirements) = tokio::try_join!(
+        let (models, requirements, collaboration_modes) = tokio::try_join!(
             async {
                 self.client
                     .request_typed::<ModelListResponse>(ClientRequest::ModelList {
@@ -600,6 +605,7 @@ impl AppServerSession {
                         )
                     })
             },
+            async { Ok(crate::collaboration_modes::list(self.request_handle()).await) },
         )?;
         self.managed_new_thread_defaults = requirements
             .requirements
@@ -677,6 +683,7 @@ impl AppServerSession {
             feedback_audience,
             has_chatgpt_account,
             available_models,
+            collaboration_modes,
         })
     }
 
@@ -1236,6 +1243,7 @@ impl AppServerSession {
     pub(crate) async fn turn_start(
         &mut self,
         thread_id: ThreadId,
+        client_user_message_id: String,
         items: Vec<UserInput>,
         cwd: PathBuf,
         approval_policy: AskForApproval,
@@ -1259,7 +1267,7 @@ impl AppServerSession {
                 params: TurnStartParams {
                     thread_id: thread_id.to_string(),
                     turn_trigger: None,
-                    client_user_message_id: None,
+                    client_user_message_id: Some(client_user_message_id),
                     input: items,
                     tool_output: None,
                     responsesapi_client_metadata: None,
@@ -1317,6 +1325,7 @@ impl AppServerSession {
         &mut self,
         thread_id: ThreadId,
         turn_id: String,
+        client_user_message_id: String,
         items: Vec<UserInput>,
     ) -> std::result::Result<TurnSteerResponse, TypedRequestError> {
         let request_id = self.next_request_id();
@@ -1325,7 +1334,7 @@ impl AppServerSession {
                 request_id,
                 params: TurnSteerParams {
                     thread_id: thread_id.to_string(),
-                    client_user_message_id: None,
+                    client_user_message_id: Some(client_user_message_id),
                     input: items,
                     responsesapi_client_metadata: None,
                     additional_context: None,
@@ -3701,6 +3710,8 @@ mod tests {
         let read_only_profile = PermissionProfile::read_only();
         let response = ThreadResumeResponse {
             thread: codex_app_server_protocol::Thread {
+                originator: None,
+                environments: None,
                 id: thread_id.to_string(),
                 extra: None,
                 session_id: ThreadId::new().to_string(),

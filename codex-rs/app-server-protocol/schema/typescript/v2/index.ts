@@ -31,6 +31,8 @@ export type { AppTemplateUnavailableReason } from "./AppTemplateUnavailableReaso
 export type { AppToolApproval } from "./AppToolApproval";
 export type { AppToolSummary } from "./AppToolSummary";
 export type { AppToolsConfig } from "./AppToolsConfig";
+export type { ApplicationNetworkRequirements } from "./ApplicationNetworkRequirements";
+export type { ApplicationRequirements } from "./ApplicationRequirements";
 export type { ApprovalsReviewer } from "./ApprovalsReviewer";
 export type { AppsConfig } from "./AppsConfig";
 export type { AppsDefaultConfig } from "./AppsDefaultConfig";
@@ -473,6 +475,7 @@ export type { ThreadCompactStartResponse } from "./ThreadCompactStartResponse";
 export type { ThreadDeleteParams } from "./ThreadDeleteParams";
 export type { ThreadDeleteResponse } from "./ThreadDeleteResponse";
 export type { ThreadDeletedNotification } from "./ThreadDeletedNotification";
+export type { ThreadEnvironment } from "./ThreadEnvironment";
 export type { ThreadExtra } from "./ThreadExtra";
 export type { ThreadForkParams } from "./ThreadForkParams";
 export type { ThreadForkResponse } from "./ThreadForkResponse";
