@@ -1182,6 +1182,12 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
    token usage record to the rollout. If it anchors the way `EventMsg::TokenCount` does, M7
    hydration may get measured per-item costs for the replayed prefix too, not just the live
    suffix. Assess when M7 starts.
+5. **Unsizable items are silently zero** (M2d). Both the adapter and the profiler size an item
+   with `serde_json::to_vec(item).map(len).unwrap_or(0)`. Serialization of `ResponseItem` cannot
+   fail for today's types, and a panic in a diagnostic layer must never take the session down,
+   but a zero-byte item would take a zero share in apportioning - a quiet under-count. When M2d
+   adds classification diagnostics, size items through one shared helper and count failures next
+   to `unrecognized_fragment_count` so `/ctx` can say "n items could not be sized".
 
 ### Resolved since the first draft
 
