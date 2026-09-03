@@ -947,10 +947,12 @@ used a percentage threshold with no absolute floor (an `86% TRUNCATED` verdict o
 Neither was caught by a test - both were visible only because a number looked implausible.
 
 The accumulator does exactly this class of work: ordering by `seq`, pairing calls with outputs,
-aligning anchors with the items preceding them. So there must be a test whose input is
-**deliberately shuffled relative to arrival order**, asserting the fold still produces the correct
-result. Without it the same bug reappears somewhere it yields plausible numbers rather than an
-obvious `-787%`. Findings §10.5. Then: residual establishment at the first anchor, drift updates at later anchors
+aligning anchors with the items preceding them. So there must be a test that proves internal
+iteration order never leaks into results. The first draft asked for a literally shuffled input;
+M2c translated that into the determinism suite described under Fixtures, because arrival order
+*is* the fold's semantics and a shuffled input describes a different stream. Without it the same
+bug reappears somewhere it yields plausible numbers rather than an obvious `-787%`. Findings
+§10.5. Then: residual establishment at the first anchor, drift updates at later anchors
 (named so they do not imply the baseline is permanently fixed), epoch sealing, `call_id` grouping,
 `Resume` epochs, out-of-turn items, anomaly counters.
 
@@ -1093,13 +1095,14 @@ branch. Each stage compiles and passes `just test -p codex-context-profiler` at 
 | Stage | Branch | Scope (~lines) | Exit criterion |
 |---|---|---|---|
 | M2a | `context-profiler-crate` | Crate skeleton, `BUILD.bazel` + lock update, `ProfilerEvent` and all model types, no logic (~350) | Workspace builds; `just bazel-lock-check` passes |
-| M2b | `profiler-live-adapter` | Scoped `experimental_raw_events`, notification→event, usage buffering, `Lagged` broadcast, `ProfilerRegistry` on `App`, JSONL writer (~500) | A live session's adapter JSONL matches the M1 probe log |
-| M2c | `profiler-accumulator` | Fold, grouping, turn deltas, anchor-delta attribution incl. multi-item apportioning (~500) | Fed the M1 captures, reproduces `analyse_capture.py`'s measured deltas (1,040 / 3,373 / 2,219 / 5,043); handles the interrupted turn's stranded items and the −192 boundary; **shuffled-input test passes** (findings §10.5) |
+| M2b | `profiler-live-adapter` | Scoped `experimental_raw_events`, notification→event (no usage buffering: `WindowUpdated` is its own event), `Lagged` broadcast, `ProfilerRegistry` on `App`, JSONL writer (~500) | A live session's adapter JSONL matches the M1 probe log |
+| M2c | `profiler-accumulator` | Fold, grouping, turn deltas, anchor-delta attribution incl. multi-item apportioning (~500) | Fed the M1 captures, reproduces `analyse_capture.py`'s measured deltas (1,040 / 3,373 / 2,219 / 5,043); handles the interrupted turn's stranded items and the −192 boundary; **determinism suite passes** (findings §10.5, translated - see Fixtures) |
 | M2d | `profiler-classification` | Classification + unrecognised-fragment counter, estimator with `Reasoning` special-case, scrubber + committed fixtures (~400) | Category totals over the captures are sane; fixtures pass `assert_no_home_paths` |
 
 Ordering is dependency order, and deliberately puts the two exact, provable layers (adapter,
 accumulator) before the fuzzy one (classification, estimation) - a wrong number in M2d is then
-M2d's fault, not something beneath it. M2b is the only stage touching `codex-tui`.
+M2d's fault, not something beneath it. M2b is the stage that wires `codex-tui`; later stages touch
+the adapter only when the event contract changes (M2c added `UsageMissing`).
 
 ### M1, re-scoped
 

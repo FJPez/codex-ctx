@@ -569,8 +569,10 @@ Three results:
 - `TurnStatus::Interrupted` arrives on the wire, confirming `TurnOutcome` should mirror v2
   vocabulary rather than core's "aborted".
 - **No `raw_usage` line at all** for the final response - not `usage: None`. The notification
-  simply never arrives. The adapter's null-usage branch may therefore be unreachable; keep
-  `missing_usage_count` but expect the real case to be *absent*, not *null*.
+  simply never arrives. The adapter's null-usage branch may therefore be unreachable in practice;
+  it emits `ProfilerEvent::UsageMissing` (an unpriced response boundary, added in the M2c review,
+  superseding the earlier `missing_usage_count` counter) but expect the real case to be *absent*,
+  not *null*.
 - **Items are stranded past the last anchor.** `CustomToolCallOutput(291)` and `Message(526)` both
   arrived after the final usage, so they have no measured cost. Anchor-delta attribution has a
   trailing gap on every interrupted turn, and those items can only be estimated.
@@ -649,9 +651,12 @@ because a number looked implausible:
 **Impact on M2's tests, not just the tooling.** The accumulator does exactly this class of work -
 ordering items by `seq`, pairing calls with outputs, aligning anchors with the items preceding
 them. Both bugs are the same mistake: **assuming a container's iteration order carries meaning.**
-So the accumulator's tests must include a case whose input is deliberately shuffled relative to
-arrival order, and assert the fold still produces the correct result. Without it the same bug
-reappears somewhere it produces plausible numbers rather than a −787%.
+So the accumulator's tests must prove that internal iteration order never leaks into results.
+The first draft asked for a literally shuffled input; M2c translated that into a determinism
+suite (fold the same stream twice, assert byte-identical serialized state; assert explicit
+orderings of items, groups, and categories), because arrival order *is* the fold's semantics and
+a shuffled input describes a different stream. Without it the same bug reappears somewhere it
+produces plausible numbers rather than a −787%.
 
 ## 11. Superseded decisions and corrections
 
