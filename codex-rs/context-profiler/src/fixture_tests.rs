@@ -12,6 +12,7 @@ use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::ResponseItem;
 use pretty_assertions::assert_eq;
 
 /// Stand-ins for the live capture's turn ids; the fold only needs them to be distinct.

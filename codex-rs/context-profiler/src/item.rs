@@ -1,6 +1,9 @@
 //! History items, their classification, and the groups they are displayed in.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+/// Ordered by declaration, so category aggregates are deterministic.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Category {
     UserMessage,
     AgentMessage,
@@ -10,22 +13,6 @@ pub enum Category {
     Instructions,
     Compaction,
     Other,
-}
-
-impl Category {
-    /// Declaration order, so category aggregates are deterministic.
-    pub(crate) fn ordinal(self) -> u8 {
-        match self {
-            Self::UserMessage => 0,
-            Self::AgentMessage => 1,
-            Self::Reasoning => 2,
-            Self::ToolCall => 3,
-            Self::ToolOutput => 4,
-            Self::Instructions => 5,
-            Self::Compaction => 6,
-            Self::Other => 7,
-        }
-    }
 }
 
 /// Which measured total may price an item. Never derived from `Category`.

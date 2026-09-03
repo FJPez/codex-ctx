@@ -9,6 +9,7 @@ use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 
@@ -194,7 +195,7 @@ fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> I
         pricing: classification.pricing,
         bytes: item_bytes(item),
         cost: item_cost(item),
-        label: item_kind(item).to_string(),
+        label: item_kind(item).as_str().to_string(),
         group,
         item_id: None,
         parts: classification.parts,

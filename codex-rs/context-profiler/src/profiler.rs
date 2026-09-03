@@ -6,8 +6,6 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
-use codex_protocol::models::ResponseItem;
-
 use crate::classify::classify;
 use crate::estimate::item_tokens;
 use crate::estimate::serialized_size;
@@ -19,6 +17,8 @@ use crate::item::ItemGroup;
 use crate::item::ItemSummary;
 use crate::item::PricingKind;
 use crate::item::TokenCost;
+use crate::kind::call_id;
+use crate::kind::item_kind;
 use crate::snapshot::ProfilerState;
 use crate::snapshot::TurnDelta;
 use crate::usage::UsageSnapshot;
@@ -99,7 +99,7 @@ impl ContextProfiler {
                     pricing: classification.pricing,
                     bytes: size.unwrap_or(0),
                     cost: TokenCost::Estimated(estimate),
-                    label: item_kind(item).to_string(),
+                    label: item_kind(item).as_str().to_string(),
                     group,
                     item_id: item.id().map(ToString::to_string),
                     parts: classification.parts,
@@ -324,7 +324,7 @@ impl ContextProfiler {
                 .or_insert(item.cost);
         }
         let mut by_category: Vec<(Category, TokenCost)> = totals.into_iter().collect();
-        by_category.sort_by_key(|(category, _)| category.ordinal());
+        by_category.sort_by_key(|(category, _)| *category);
         self.state.snapshot.groups = groups;
         self.state.snapshot.by_category = by_category;
     }
@@ -362,53 +362,6 @@ fn apportion(total: i64, weights: &[i64]) -> Vec<i64> {
         assigned = cumulative;
     }
     shares
-}
-
-fn item_kind(item: &ResponseItem) -> &'static str {
-    match item {
-        ResponseItem::AdditionalTools { .. } => "AdditionalTools",
-        ResponseItem::Message { .. } => "Message",
-        ResponseItem::AgentMessage { .. } => "AgentMessage",
-        ResponseItem::Reasoning { .. } => "Reasoning",
-        ResponseItem::LocalShellCall { .. } => "LocalShellCall",
-        ResponseItem::FunctionCall { .. } => "FunctionCall",
-        ResponseItem::ToolSearchCall { .. } => "ToolSearchCall",
-        ResponseItem::FunctionCallOutput { .. } => "FunctionCallOutput",
-        ResponseItem::CustomToolCall { .. } => "CustomToolCall",
-        ResponseItem::CustomToolCallOutput { .. } => "CustomToolCallOutput",
-        ResponseItem::ToolSearchOutput { .. } => "ToolSearchOutput",
-        ResponseItem::WebSearchCall { .. } => "WebSearchCall",
-        ResponseItem::ImageGenerationCall { .. } => "ImageGenerationCall",
-        ResponseItem::Compaction { .. } => "Compaction",
-        ResponseItem::CompactionTrigger { .. } => "CompactionTrigger",
-        ResponseItem::ConfigurationUpdate { .. } => "ConfigurationUpdate",
-        ResponseItem::ContextCompaction { .. } => "ContextCompaction",
-        ResponseItem::Other => "Other",
-    }
-}
-
-/// Mirrors the TUI adapter so the two agree on which items pair into one group.
-fn call_id(item: &ResponseItem) -> Option<String> {
-    match item {
-        ResponseItem::LocalShellCall { call_id, .. }
-        | ResponseItem::ToolSearchCall { call_id, .. }
-        | ResponseItem::FunctionCallOutput { call_id, .. }
-        | ResponseItem::ToolSearchOutput { call_id, .. } => call_id.clone(),
-        ResponseItem::FunctionCall { call_id, .. }
-        | ResponseItem::CustomToolCall { call_id, .. }
-        | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.clone()),
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::Message { .. }
-        | ResponseItem::AgentMessage { .. }
-        | ResponseItem::Reasoning { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::Compaction { .. }
-        | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::ConfigurationUpdate { .. }
-        | ResponseItem::ContextCompaction { .. }
-        | ResponseItem::Other => None,
-    }
 }
 
 #[cfg(test)]

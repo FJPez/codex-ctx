@@ -6,8 +6,9 @@ use codex_app_server_protocol::TurnStatus;
 use codex_context_profiler::InvalidationReason;
 use codex_context_profiler::ProfilerEvent;
 use codex_context_profiler::UsageSnapshot;
+use codex_context_profiler::call_id;
+use codex_context_profiler::item_kind;
 use codex_context_profiler::serialized_size;
-use codex_protocol::models::ResponseItem;
 use serde::Serialize;
 
 /// One observation, flattened for a trace log. Never carries item text.
@@ -235,7 +236,7 @@ fn to_record(
         ProfilerEvent::Item { turn_id, item } => (
             Some(turn_id.to_string()),
             RecordedKind::Item {
-                item_kind: item_kind(item).to_string(),
+                item_kind: item_kind(item).as_str().to_string(),
                 bytes: serialized_size(item).unwrap_or(0),
                 items_seq,
                 stamped_turn_id: item.turn_id().map(str::to_string),
@@ -310,53 +311,6 @@ fn turn_status_name(status: &TurnStatus) -> &'static str {
         TurnStatus::Interrupted => "interrupted",
         TurnStatus::Failed => "failed",
         TurnStatus::InProgress => "inProgress",
-    }
-}
-
-/// Exhaustive so a new upstream `ResponseItem` variant fails the build.
-fn item_kind(item: &ResponseItem) -> &'static str {
-    match item {
-        ResponseItem::AdditionalTools { .. } => "AdditionalTools",
-        ResponseItem::Message { .. } => "Message",
-        ResponseItem::AgentMessage { .. } => "AgentMessage",
-        ResponseItem::Reasoning { .. } => "Reasoning",
-        ResponseItem::LocalShellCall { .. } => "LocalShellCall",
-        ResponseItem::FunctionCall { .. } => "FunctionCall",
-        ResponseItem::ToolSearchCall { .. } => "ToolSearchCall",
-        ResponseItem::FunctionCallOutput { .. } => "FunctionCallOutput",
-        ResponseItem::CustomToolCall { .. } => "CustomToolCall",
-        ResponseItem::CustomToolCallOutput { .. } => "CustomToolCallOutput",
-        ResponseItem::ToolSearchOutput { .. } => "ToolSearchOutput",
-        ResponseItem::WebSearchCall { .. } => "WebSearchCall",
-        ResponseItem::ImageGenerationCall { .. } => "ImageGenerationCall",
-        ResponseItem::Compaction { .. } => "Compaction",
-        ResponseItem::CompactionTrigger { .. } => "CompactionTrigger",
-        ResponseItem::ConfigurationUpdate { .. } => "ConfigurationUpdate",
-        ResponseItem::ContextCompaction { .. } => "ContextCompaction",
-        ResponseItem::Other => "Other",
-    }
-}
-
-fn call_id(item: &ResponseItem) -> Option<String> {
-    match item {
-        ResponseItem::LocalShellCall { call_id, .. }
-        | ResponseItem::ToolSearchCall { call_id, .. }
-        | ResponseItem::FunctionCallOutput { call_id, .. }
-        | ResponseItem::ToolSearchOutput { call_id, .. } => call_id.clone(),
-        ResponseItem::FunctionCall { call_id, .. }
-        | ResponseItem::CustomToolCall { call_id, .. }
-        | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.clone()),
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::Message { .. }
-        | ResponseItem::AgentMessage { .. }
-        | ResponseItem::Reasoning { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::Compaction { .. }
-        | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::ConfigurationUpdate { .. }
-        | ResponseItem::ContextCompaction { .. }
-        | ResponseItem::Other => None,
     }
 }
 
