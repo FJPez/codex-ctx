@@ -174,11 +174,7 @@ fn item_bytes(item: &ResponseItem) -> usize {
 /// The initial estimate an item carries until an anchor prices it.
 fn item_cost(item: &ResponseItem) -> TokenCost {
     let classification = classify(item);
-    TokenCost::Estimated(item_tokens(
-        classification.category,
-        &classification.parts,
-        item_bytes(item),
-    ))
+    TokenCost::Estimated(item_tokens(item, &classification.parts, item_bytes(item)))
 }
 
 /// The apportioning weights are the items' current estimates, never their bytes.
@@ -1013,6 +1009,26 @@ fn reasoning_and_generated_output_are_priced_from_separate_measured_totals() {
         vec![TokenCost::Exact(100), TokenCost::Exact(50)],
         costs(&profiler)
     );
+}
+
+/// Reasoning tokens with no reasoning item in the span belong to nothing we observed there, so the
+/// generated items take only the remainder.
+#[test]
+fn reasoning_tokens_without_a_reasoning_item_are_not_given_to_the_generated_items() {
+    let answer = message_item("done");
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(&mut profiler, TURN, &[&answer]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 40,
+            ..anchor(1_000, 1_000, 100, 1)
+        },
+    });
+
+    assert_eq!(vec![TokenCost::Exact(60)], costs(&profiler));
 }
 
 #[test]

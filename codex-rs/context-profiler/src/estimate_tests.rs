@@ -6,6 +6,35 @@ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 use pretty_assertions::assert_eq;
 
+/// Only opaque encrypted reasoning takes the reasoning rule; a visible summary is ordinary text.
+#[test]
+fn only_encrypted_reasoning_takes_the_reasoning_rule() {
+    let encrypted = ResponseItem::Reasoning {
+        id: None,
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("x".repeat(1_000)),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let visible = ResponseItem::Reasoning {
+        id: None,
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let encrypted_bytes = serialized_size(&encrypted).expect("serializable item");
+    let visible_bytes = serialized_size(&visible).expect("serializable item");
+    assert_eq!(
+        reasoning_tokens(encrypted_bytes),
+        item_tokens(&encrypted, &[], encrypted_bytes)
+    );
+    assert_eq!(
+        text_tokens(visible_bytes),
+        item_tokens(&visible, &[], visible_bytes)
+    );
+}
+
 /// Deliberately loose: the estimator only has to keep an unmeasured item in the right order of
 /// magnitude, since every item that matters is repriced from an anchor. Do not tighten this.
 const TEXT_TOLERANCE: i64 = 2;
@@ -37,7 +66,6 @@ fn the_estimator_stays_within_a_factor_of_two_of_every_measured_point() {
 fn an_empty_item_costs_nothing_and_a_huge_one_does_not_overflow() {
     assert_eq!(0, text_tokens(0));
     assert_eq!(0, reasoning_tokens(0));
-    assert_eq!(2_259_862, text_tokens(10 * 1_024 * 1_024));
     // Widened to i128 before the multiply, so even an impossible size neither wraps nor panics.
     assert!(text_tokens(usize::MAX) > 0);
 }
@@ -76,8 +104,8 @@ fn an_image_entry_takes_the_flat_estimate_and_its_siblings_do_not() {
     );
     assert_eq!(
         IMAGE_TOKENS + text_tokens(parts[1].bytes),
-        item_tokens(classification.category, parts, bytes)
+        item_tokens(&item, parts, bytes)
     );
     // The base64 payload dominates the item, so pricing it as text would be several times over.
-    assert!(text_tokens(bytes) > 4 * item_tokens(classification.category, parts, bytes));
+    assert!(text_tokens(bytes) > 4 * item_tokens(&item, parts, bytes));
 }

@@ -8,6 +8,8 @@
 
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::APPS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
@@ -35,6 +37,12 @@ const UNKNOWN_KIND: &str = "unknown";
 /// Kinds whose display category is not the default instruction one.
 const USER_KIND_PREFIX: &str = "user.";
 const COMPACTION_SUMMARY_KIND: &str = "compaction.summary";
+/// Core substitutes these for user input it could not deliver, so they stay the user's.
+const USER_REPLACEMENT_KINDS: [&str; 3] = [
+    "images.preparation_error",
+    "images.unsupported",
+    "audio.unsupported",
+];
 
 /// Fallback only, for messages that reach us without `content_item_kinds` at all.
 const INSTRUCTION_OPEN_TAGS: [&str; 12] = [
@@ -97,26 +105,30 @@ impl Role {
 }
 
 pub(crate) fn classify(item: &ResponseItem) -> Classification {
-    let pricing = pricing_kind(item);
     match item {
         ResponseItem::Message { role, content, .. } => {
             let role = Role::parse(role);
             let mut warnings = Vec::new();
-            let parts = message_parts(item, role, content, &mut warnings);
-            let category = match role_category(role, &mut warnings) {
-                Some(category) => category,
-                None => merge_categories(&parts, &mut warnings),
-            };
+            let fixed = role_category(role, &mut warnings);
+            let parts = message_parts(item, fixed, content, &mut warnings);
+            let category = fixed.unwrap_or_else(|| merge_categories(&parts, &mut warnings));
             Classification {
                 category,
-                pricing,
+                pricing: pricing_for_role(role),
                 parts,
                 warnings,
             }
         }
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => Classification {
+            category: Category::ToolOutput,
+            pricing: pricing_kind(item),
+            parts: output_parts(&output.body),
+            warnings: Vec::new(),
+        },
         ResponseItem::ConfigurationUpdate { .. } => Classification {
             category: Category::Other,
-            pricing,
+            pricing: pricing_kind(item),
             parts: vec![ContentPart {
                 kind: "configuration_update".to_string(),
                 bytes: serialized_size(item).unwrap_or(0),
@@ -131,9 +143,7 @@ pub(crate) fn classify(item: &ResponseItem) -> Classification {
         | ResponseItem::LocalShellCall { .. }
         | ResponseItem::FunctionCall { .. }
         | ResponseItem::ToolSearchCall { .. }
-        | ResponseItem::FunctionCallOutput { .. }
         | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::CustomToolCallOutput { .. }
         | ResponseItem::ToolSearchOutput { .. }
         | ResponseItem::WebSearchCall { .. }
         | ResponseItem::ImageGenerationCall { .. }
@@ -141,30 +151,45 @@ pub(crate) fn classify(item: &ResponseItem) -> Classification {
         | ResponseItem::CompactionTrigger { .. }
         | ResponseItem::ContextCompaction { .. } => Classification {
             category: structural_category(item),
-            pricing,
+            pricing: pricing_kind(item),
             parts: Vec::new(),
             warnings: Vec::new(),
         },
         // The serde fallback: an item type this build does not know, so its arrival is the signal.
         ResponseItem::Other => Classification {
             category: Category::Other,
-            pricing,
+            pricing: pricing_kind(item),
             parts: Vec::new(),
             warnings: vec![ClassificationWarning::UnknownItemType],
         },
     }
 }
 
+/// Structured tool outputs can carry images and audio, which must not be priced as prose.
+fn output_parts(body: &FunctionCallOutputBody) -> Vec<ContentPart> {
+    let FunctionCallOutputBody::ContentItems(entries) = body else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .map(|entry| ContentPart {
+            kind: String::new(),
+            bytes: serialized_size(entry).unwrap_or(0),
+            category: Category::ToolOutput,
+            media: match entry {
+                FunctionCallOutputContentItem::InputText { .. }
+                | FunctionCallOutputContentItem::EncryptedContent { .. } => PartMedia::Text,
+                FunctionCallOutputContentItem::InputImage { .. } => PartMedia::Image,
+                FunctionCallOutputContentItem::InputAudio { .. } => PartMedia::Audio,
+            },
+        })
+        .collect()
+}
+
 /// Which measured total may price an item; exhaustive so a new upstream variant fails the build.
 pub(crate) fn pricing_kind(item: &ResponseItem) -> PricingKind {
     match item {
-        ResponseItem::Message { role, .. } => match Role::parse(role) {
-            Role::User | Role::Developer => PricingKind::Input,
-            Role::Assistant => PricingKind::Output,
-            // Core drops raw system messages after the raw-stream clone; unknown roles could go
-            // either way.
-            Role::System | Role::Unknown => PricingKind::Ambiguous,
-        },
+        ResponseItem::Message { role, .. } => pricing_for_role(Role::parse(role)),
         ResponseItem::FunctionCallOutput { .. }
         | ResponseItem::CustomToolCallOutput { .. }
         | ResponseItem::ToolSearchOutput { .. } => PricingKind::Input,
@@ -182,6 +207,16 @@ pub(crate) fn pricing_kind(item: &ResponseItem) -> PricingKind {
         | ResponseItem::ContextCompaction { .. }
         | ResponseItem::Other
         | ResponseItem::ConfigurationUpdate { .. } => PricingKind::Ambiguous,
+    }
+}
+
+fn pricing_for_role(role: Role) -> PricingKind {
+    match role {
+        Role::User | Role::Developer => PricingKind::Input,
+        Role::Assistant => PricingKind::Output,
+        // Core drops raw system messages after the raw-stream clone; unknown roles could go
+        // either way.
+        Role::System | Role::Unknown => PricingKind::Ambiguous,
     }
 }
 
@@ -213,12 +248,12 @@ fn structural_category(item: &ResponseItem) -> Category {
 /// long kind array cannot silently shift every later entry's classification.
 fn message_parts(
     item: &ResponseItem,
-    role: Role,
+    fixed: Option<Category>,
     content: &[ContentItem],
     warnings: &mut Vec<ClassificationWarning>,
 ) -> Vec<ContentPart> {
     let kinds = content_item_kinds(item);
-    if role_consults_kinds(role) && kinds.len() != content.len() {
+    if fixed.is_none() && !kinds.is_empty() && kinds.len() != content.len() {
         note(warnings, ClassificationWarning::KindLengthMismatch);
     }
     content
@@ -229,7 +264,7 @@ fn message_parts(
             ContentPart {
                 kind: kind.unwrap_or_default().to_string(),
                 bytes: serialized_size(entry).unwrap_or(0),
-                category: entry_category(role, kind, entry, warnings),
+                category: fixed.unwrap_or_else(|| entry_category(kind, entry, warnings)),
                 media: part_media(entry),
             }
         })
@@ -258,11 +293,6 @@ fn role_category(role: Role, warnings: &mut Vec<ClassificationWarning>) -> Optio
     }
 }
 
-/// Only user-role messages carry meaningful kinds; core stamps `unknown` on everything else.
-fn role_consults_kinds(role: Role) -> bool {
-    matches!(role, Role::User | Role::Developer)
-}
-
 fn content_item_kinds(item: &ResponseItem) -> &[ContentItemKind] {
     match item {
         ResponseItem::Message {
@@ -273,27 +303,23 @@ fn content_item_kinds(item: &ResponseItem) -> &[ContentItemKind] {
     }
 }
 
+/// User- and developer-role entries only; every other role is decided by `role_category`.
 fn entry_category(
-    role: Role,
     kind: Option<&str>,
     entry: &ContentItem,
     warnings: &mut Vec<ClassificationWarning>,
 ) -> Category {
-    match role {
-        Role::Assistant => Category::AgentMessage,
-        Role::System => Category::Instructions,
-        Role::User | Role::Developer => match kind {
-            Some(kind) if kind.starts_with(USER_KIND_PREFIX) => Category::UserMessage,
-            Some(COMPACTION_SUMMARY_KIND) => Category::Compaction,
-            Some(kind) if !kind.is_empty() && kind != UNKNOWN_KIND => Category::Instructions,
-            _ => {
-                note(warnings, ClassificationWarning::MarkerFallback);
-                tagged_fallback(entry)
-            }
-        },
-        Role::Unknown => {
-            note(warnings, ClassificationWarning::UnknownRole);
-            Category::Other
+    match kind {
+        Some(kind)
+            if kind.starts_with(USER_KIND_PREFIX) || USER_REPLACEMENT_KINDS.contains(&kind) =>
+        {
+            Category::UserMessage
+        }
+        Some(COMPACTION_SUMMARY_KIND) => Category::Compaction,
+        Some(kind) if !kind.is_empty() && kind != UNKNOWN_KIND => Category::Instructions,
+        _ => {
+            note(warnings, ClassificationWarning::MarkerFallback);
+            tagged_fallback(entry)
         }
     }
 }

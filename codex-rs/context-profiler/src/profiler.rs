@@ -89,9 +89,8 @@ impl ContextProfiler {
                 if classification.warned() {
                     self.state.classification_warning_count += 1;
                 }
-                let estimate = size.map_or(0, |bytes| {
-                    item_tokens(classification.category, &classification.parts, bytes)
-                });
+                let estimate =
+                    size.map_or(0, |bytes| item_tokens(item, &classification.parts, bytes));
                 self.state.snapshot.items.push(ItemSummary {
                     seq,
                     turn_index,

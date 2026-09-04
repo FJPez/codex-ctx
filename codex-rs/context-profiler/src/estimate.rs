@@ -14,13 +14,31 @@
 //! Text sits in a narrow band, so one global constant covers it; reasoning is two orders of
 //! magnitude off it and needs its own rule.
 
-use crate::item::Category;
+use codex_protocol::models::ResponseItem;
+
 use crate::item::ContentPart;
 use crate::item::PartMedia;
 
+/// Counts serialized bytes without keeping them.
+#[derive(Default)]
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Serialized size of a value, or `None` if it cannot be serialized.
 pub fn serialized_size<T: serde::Serialize>(value: &T) -> Option<usize> {
-    serde_json::to_vec(value).ok().map(|json| json.len())
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, value).ok()?;
+    Some(counter.0)
 }
 
 /// Bytes per 100 tokens: the median of the seven non-reasoning densities above, 4.64, held as an
@@ -51,8 +69,12 @@ pub(crate) fn reasoning_tokens(bytes: usize) -> i64 {
 ///
 /// Messages are summed per content entry so a mixed one - text alongside an image - is not priced
 /// as if the image's base64 were prose.
-pub(crate) fn item_tokens(category: Category, parts: &[ContentPart], bytes: usize) -> i64 {
-    if category == Category::Reasoning {
+pub(crate) fn item_tokens(item: &ResponseItem, parts: &[ContentPart], bytes: usize) -> i64 {
+    if let ResponseItem::Reasoning {
+        encrypted_content: Some(_),
+        ..
+    } = item
+    {
         return reasoning_tokens(bytes);
     }
     if parts.is_empty() {

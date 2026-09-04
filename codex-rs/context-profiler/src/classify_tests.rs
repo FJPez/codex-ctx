@@ -1,6 +1,9 @@
 use super::*;
 use codex_protocol::models::ConfigurationReasoning;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
@@ -57,6 +60,11 @@ fn content_kind_families_decide_message_categories() {
                 }],
                 Some(&["user.image"]),
             ),
+            Category::UserMessage,
+            false,
+        ),
+        (
+            user("images.unsupported", "[image could not be sent]"),
             Category::UserMessage,
             false,
         ),
@@ -164,14 +172,50 @@ fn an_untagged_message_falls_back_to_the_open_tag_marker() {
 
     let tagged = classify(&tagged);
     let plain = classify(&plain);
+    assert_eq!(Category::Instructions, tagged.category);
+    assert_eq!(Category::UserMessage, plain.category);
+    // Absent metadata is a fallback, not a length mismatch.
+    for classification in [&tagged, &plain] {
+        assert_eq!(
+            vec![ClassificationWarning::MarkerFallback],
+            classification.warnings
+        );
+    }
+}
+
+/// Structured tool outputs carry media too, and an image inside one must not be priced as prose.
+#[test]
+fn structured_tool_outputs_expose_their_media() {
+    let item = ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "call_1".to_string(),
+        name: None,
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::ContentItems(vec![
+                FunctionCallOutputContentItem::InputText {
+                    text: "screenshot attached".to_string(),
+                },
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: "data:image/png;base64,AAAA".to_string(),
+                    detail: None,
+                },
+            ]),
+            success: Some(true),
+        },
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let classification = classify(&item);
+    assert_eq!(Category::ToolOutput, classification.category);
+    assert_eq!(PricingKind::Input, classification.pricing);
     assert_eq!(
-        (Category::Instructions, true),
-        (tagged.category, tagged.warned())
+        vec![PartMedia::Text, PartMedia::Image],
+        classification
+            .parts
+            .iter()
+            .map(|part| part.media)
+            .collect::<Vec<_>>()
     );
-    assert_eq!(
-        (Category::UserMessage, true),
-        (plain.category, plain.warned())
-    );
+    assert!(classification.warnings.is_empty());
 }
 
 #[test]

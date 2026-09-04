@@ -568,10 +568,11 @@ The table for a `Message`, per content entry:
 | `assistant` | never consulted | `AgentMessage`, never warns - core stamps `unknown` on outputs |
 | `system` | never consulted | `Instructions`, never warns |
 | any other role | never consulted | `Other`, warns |
-| `user` / `developer` | starts with `user.` | `UserMessage` |
+| `user` / `developer` | starts with `user.`, or one of `images.preparation_error`, `images.unsupported`, `audio.unsupported` (core's replacements for user input it could not deliver) | `UserMessage` |
 | `user` / `developer` | `compaction.summary` | `Compaction` (`compaction.auto_fallback_prompt` is an instruction) |
 | `user` / `developer` | any other non-empty kind that is not `unknown` | `Instructions` |
-| `user` / `developer` | missing, empty, or `unknown` | fallback on the twelve public `*_OPEN_TAG` constants: `Instructions` if the entry's text starts with one, else `UserMessage`; warns either way |
+| `user` / `developer` | missing, empty, or `unknown` | fallback on the twelve public `*_OPEN_TAG` constants: `Instructions` if the entry's text starts with one, else `UserMessage`; warns `MarkerFallback` either way. A message with no kind metadata at all is a fallback, not a length mismatch; `KindLengthMismatch` needs a kind array that is present but the wrong length |
+| tool output with structured content | not consulted | `ToolOutput`, with one part per content entry so an embedded image or audio clip is priced as media, not prose |
 
 Kind strings churn upstream (`host_skills.instructions` no longer exists), so nothing here matches a
 list of known kinds: an instruction fragment we have never heard of still reads as `Instructions`,
@@ -592,7 +593,10 @@ flat estimate, and audio takes the byte fallback core itself uses when it cannot
 and the message role alone: `Input` for user/developer messages and tool outputs, `Output` for
 assistant messages and every call and reasoning item, `Ambiguous` for system and unknown roles,
 `ConfigurationUpdate`, `CompactionTrigger`, `AdditionalTools`, `Compaction`, `ContextCompaction`,
-and `Other`. This is what fixes instruction fragments being unpriced: they display as `Instructions`
+and `Other`. `AdditionalTools` is request-scoped tool schemas that core splices into the request
+prefix; it has never been observed on the raw stream, and if it ever appears its token behaviour
+is unmeasured, so it stays `Ambiguous` rather than being assumed `Input`. This is what fixes
+instruction fragments being unpriced: they display as `Instructions`
 but price as `Input`, because that is what the next request serialises. The `Ambiguous` invariant:
 if an attribution span contains an `Ambiguous` item, the whole span keeps its initial estimates -
 neither measured total can be divided when part of the span may have landed in the other one - but
@@ -883,8 +887,11 @@ as if the image's base64 were prose. Every other item is estimated from its whol
 **Reasoning is priced from its own measured total.** `reasoning_output_tokens` is a documented
 subset of `output_tokens` (the API's `output_tokens_details.reasoning_tokens`), so the output pass
 splits in two: `Reasoning` items in the span share `reasoning_output_tokens`, and the remaining
-output-kind items share `output_tokens - reasoning_output_tokens`, floored at zero. A span with no
-reasoning items shares `output_tokens` whole, as before. The split applies only when the anchor
+output-kind items share `output_tokens - reasoning_output_tokens`, floored at zero. When the anchor
+reports reasoning tokens but the span holds no reasoning item (it was stranded earlier, or sits
+across a `UsageMissing` boundary), those tokens belong to nothing observed in the span and go
+unattributed into drift; the generated items still take only the remainder, never the whole
+`output_tokens`. The split applies only when the anchor
 reports a positive reasoning subset: a zero is what an unreported `output_tokens_details` reads
 as, never evidence of free reasoning, so a zero pools every output item on `output_tokens` by
 estimate weight rather than minting `Exact(0)` from missing data. Mixing the two
@@ -1312,6 +1319,28 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
    `ResponseItem::Compaction`. M5 opens an epoch on the `ContextCompaction` boundary and never
    infers the mechanism from the one case it previously knew; `replacement_history` from the
    rollout is the only source of a fresh window's rebuilt items.
+
+### Deferred cleanups (M2d review)
+
+Noted so they are not re-derived; none affects correctness.
+
+- Rename `ContextProfiler::turn_index` (called for its side effect of opening an implicit turn in
+  two arms) to something like `ensure_open_turn`.
+- Three apportionment tests compute their expectations with `apportion` itself; add a literal
+  share to each when next touched.
+- Two live-trace fixture assertions (`13` anchors, `42` items) describe the record table, not the
+  fold; drop them.
+- Comment density in `profiler.rs` (`attribute_span`), `estimate.rs` (the calibration table
+  duplicates this spec), and `item.rs` (the span rule on the enum variant) is above the repo's
+  one-line style; keep the "what", cite this spec for the "why".
+- `costs`, `item_cost`/`estimated`, and `item_bytes`/`serialized_len` are duplicated between
+  `profiler_tests.rs` and `fixture_tests.rs`; a `#[cfg(test)]` support module would remove them.
+- `rebuild_aggregates` rebuilds every group after every item (quadratic over a session); fine
+  today, revisit when long histories become a target (M4 pager).
+- The profiler makes no network calls by design. OpenAI's `POST /v1/responses/input_tokens`
+  returns exact input counts for Responses-format input and would price the startup fragments
+  and the hidden residual exactly; it is recorded here so it is not rediscovered, and not pursued
+  while the profiler stays a passive observer of the stream.
 
 ### Resolved since the first draft
 

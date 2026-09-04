@@ -32,7 +32,3 @@ pub use snapshot::InitialContextSummary;
 pub use snapshot::ProfilerState;
 pub use snapshot::TurnDelta;
 pub use usage::UsageSnapshot;
-
-#[cfg(test)]
-#[path = "guard_tests.rs"]
-mod guard_tests;

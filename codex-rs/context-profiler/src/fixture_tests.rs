@@ -227,7 +227,7 @@ fn fold(records: &[Record]) -> ContextProfiler {
 fn estimated(item: &ResponseItem) -> TokenCost {
     let classification = classify(item);
     TokenCost::Estimated(item_tokens(
-        classification.category,
+        item,
         &classification.parts,
         serialized_len(item),
     ))
