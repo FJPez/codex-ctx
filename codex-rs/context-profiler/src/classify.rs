@@ -1,10 +1,5 @@
-//! Classifies an item into a display `Category` and an independent `PricingKind`.
-//!
-//! Display classification reads the harness-owned `content_item_kinds` that core stamps on
-//! contextual messages, one kind per entry of the message's `content` array. Kind strings churn
-//! across upstream versions, so nothing here matches a list of known kinds: `user.*` and
-//! `compaction.summary` are the only families with special display meaning, and every other
-//! non-empty kind on a user-role message is an injected instruction fragment.
+//! Category comes from the harness's `content_item_kinds`, pricing from the item variant and role.
+//! Family rules are in the design spec.
 
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;

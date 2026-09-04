@@ -1,7 +1,5 @@
 //! Folds `ProfilerEvent`s into `ProfilerState`.
-//!
-//! `items_seen`, and every `ItemSummary::seq` derived from it, counts the items this profiler was
-//! shown; it is never the number of items the server holds, nor the size of its context.
+//! `seq` counts the items shown to this profiler, not the number the server holds.
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -74,7 +72,7 @@ impl ContextProfiler {
                 self.open_turn(turn_id);
             }
             ProfilerEvent::Item { turn_id, item } => {
-                let turn_index = self.turn_index(turn_id);
+                let turn_index = self.ensure_open_turn(turn_id);
                 self.items_seen += 1;
                 let seq = self.items_seen;
                 let size = serialized_size(item);
@@ -107,7 +105,7 @@ impl ContextProfiler {
                 self.rebuild_aggregates();
             }
             ProfilerEvent::Usage { turn_id, usage } => {
-                self.turn_index(turn_id);
+                self.ensure_open_turn(turn_id);
                 if usage.items_seq != self.items_seen {
                     self.state.invalidated = Some(InvalidationReason::SequenceMismatch {
                         anchor_items_seen: usage.items_seq,
@@ -127,7 +125,7 @@ impl ContextProfiler {
                 self.state.anchors.push(usage);
             }
             ProfilerEvent::UsageMissing { turn_id } => {
-                self.turn_index(turn_id);
+                self.ensure_open_turn(turn_id);
                 self.last_anchor_total = None;
                 let items_seen = self.items_seen;
                 if let Some(turn) = self.open_turn.as_mut() {
@@ -153,7 +151,7 @@ impl ContextProfiler {
     }
 
     /// Index of the open turn, opening an implicit one for events that arrive outside a turn.
-    fn turn_index(&mut self, turn_id: &str) -> u32 {
+    fn ensure_open_turn(&mut self, turn_id: &str) -> u32 {
         match self.open_turn.as_ref() {
             Some(turn) => turn.index,
             None => self.open_turn(turn_id),
@@ -173,23 +171,9 @@ impl ContextProfiler {
         index
     }
 
-    /// Prices the items observed since this turn's previous anchor from the measured usage.
-    ///
-    /// Output-kind items are priced at every anchor, since `output_tokens` is an absolute. Input-kind
-    /// items need a pair of same-turn anchors, because only a delta reveals what the next request
-    /// serialized. Items left over when a turn closes keep their estimates forever.
-    ///
-    /// `reasoning_output_tokens` is a documented subset of `output_tokens` (the API's
-    /// `output_tokens_details.reasoning_tokens`), so the output pass splits in two: reasoning items
-    /// share the subset and the rest share what is left. Reasoning is priced per byte nothing like
-    /// prose, so mixing the two into one apportionment is what the split exists to avoid.
-    ///
-    /// One `Ambiguous` item poisons its whole span: neither measured total can be divided when part
-    /// of the span may have landed in the other one, so the span keeps its estimates. The anchor is
-    /// still recorded and still closes the span, so the next span prices normally.
-    ///
-    /// Reasoning tokens split off from the output pool only when the anchor reports them; a zero
-    /// is what an unreported `output_tokens_details` reads as, never evidence of free reasoning.
+    /// Output-kind items are priced at every anchor; input-kind only with a same-turn previous anchor.
+    /// An `Ambiguous` item leaves the whole span estimated.
+    /// See the design spec, Attribution.
     fn attribute_span(&mut self, usage: &UsageSnapshot) {
         let Some(turn) = self.open_turn.as_ref() else {
             return;
@@ -243,11 +227,7 @@ impl ContextProfiler {
     }
 
     /// A whole total on a lone item is exact; a share of one is not.
-    ///
-    /// Shares are weighted by each item's current cost, which is still its initial estimate: an item
-    /// is repriced exactly once, when its span closes, and the passes above weight disjoint sets.
-    /// Bytes would be the wrong weight, since an image contributes tens of kilobytes of base64 for
-    /// roughly the tokens of a paragraph.
+    /// Shares are weighted by each item's current cost.
     fn reprice(&mut self, positions: &[usize], total: i64) {
         match positions {
             [] => {}
@@ -331,10 +311,7 @@ impl ContextProfiler {
 }
 
 /// Splits `total` across `weights` so the shares sum to exactly `total`.
-///
-/// Each share is the running floor of the cumulative weight fraction minus what is already handed
-/// out, so the last cumulative floor is `total` itself and the rounding remainder lands on later
-/// entries rather than being lost. Weightless items split evenly, remainder to the earliest.
+/// The rounding remainder falls on later entries.
 fn apportion(total: i64, weights: &[i64]) -> Vec<i64> {
     if weights.is_empty() {
         return Vec::new();
