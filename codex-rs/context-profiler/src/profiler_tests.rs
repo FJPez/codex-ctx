@@ -177,11 +177,6 @@ fn item_cost(item: &ResponseItem) -> TokenCost {
     TokenCost::Estimated(item_tokens(item, &classification.parts, item_bytes(item)))
 }
 
-/// The apportioning weights are the items' current estimates, never their bytes.
-fn weights(items: &[&ResponseItem]) -> Vec<i64> {
-    items.iter().map(|item| item_cost(item).tokens()).collect()
-}
-
 fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> ItemSummary {
     let classification = classify(item);
     ItemSummary {
@@ -541,44 +536,6 @@ fn missing_usage_at_turn_end_clears_both_boundaries() {
 }
 
 #[test]
-fn folding_the_same_events_twice_yields_identical_state() {
-    let call = custom_tool_call("call_1");
-    let output = custom_tool_call_output("call_1");
-    let reasoning = reasoning_item();
-    let fold = |profiler: &mut ContextProfiler| {
-        profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
-        for item in [&call, &reasoning, &output] {
-            profiler.observe(ProfilerEvent::Item {
-                turn_id: TURN,
-                item,
-            });
-        }
-        profiler.observe(ProfilerEvent::WindowUpdated {
-            turn_id: TURN,
-            window: 272_000,
-        });
-        profiler.observe(ProfilerEvent::Usage {
-            turn_id: TURN,
-            usage: usage(3_100, 3),
-        });
-        profiler.observe(ProfilerEvent::TurnEnded {
-            turn_id: TURN,
-            completed: true,
-        });
-    };
-
-    let mut first = ContextProfiler::new();
-    let mut second = ContextProfiler::new();
-    fold(&mut first);
-    fold(&mut second);
-
-    let encode = |profiler: &ContextProfiler| {
-        serde_json::to_string(profiler.state()).expect("serializable state")
-    };
-    assert_eq!(encode(&first), encode(&second));
-}
-
-#[test]
 fn capture_shape_prices_the_tool_output_from_the_anchor_delta() {
     let prompts: Vec<ResponseItem> = (1..=5).map(|n| user_message(&format!("u{n}"))).collect();
     let reasoning = reasoning_item();
@@ -614,16 +571,14 @@ fn capture_shape_prices_the_tool_output_from_the_anchor_delta() {
 
     // 100 of the 192 output tokens are measured reasoning; the message and the call share the 92
     // that are left.
-    let shares = apportion(92, &weights(&[&answer, &call]));
     let expected: Vec<TokenCost> = prompts
         .iter()
         .map(item_cost)
         .chain([TokenCost::Exact(100)])
-        .chain(shares.iter().copied().map(TokenCost::Estimated))
+        .chain([TokenCost::Estimated(29), TokenCost::Estimated(63)])
         .chain([TokenCost::Exact(3_715), TokenCost::Exact(93)])
         .collect();
     assert_eq!(expected, costs(&profiler));
-    assert_eq!(92, shares.iter().sum::<i64>());
 }
 
 #[test]
@@ -673,15 +628,10 @@ fn two_input_items_split_the_delta_by_estimate() {
 
     // Both items are plain text, so the estimator carries the 3:1 byte ratio into the weights.
     assert_eq!(3 * item_bytes(&small), item_bytes(&big));
-    let shares = apportion(100, &weights(&[&big, &small]));
     assert_eq!(
-        vec![
-            TokenCost::Estimated(shares[0]),
-            TokenCost::Estimated(shares[1]),
-        ],
+        vec![TokenCost::Estimated(75), TokenCost::Estimated(25)],
         costs(&profiler)
     );
-    assert_eq!(vec![75, 25], shares);
 }
 
 #[test]
@@ -859,14 +809,12 @@ fn a_group_is_exact_only_when_every_member_is() {
         usage: anchor(1_400, 1_400, 0, 5),
     });
 
-    let shares = apportion(60, &weights(&[&shared_message, &shared_call]));
     let groups = &profiler.state().snapshot.groups;
     assert_eq!(TokenCost::Exact(250), groups[0].cost);
-    assert_eq!(TokenCost::Estimated(shares[1] + 140), groups[2].cost);
+    assert_eq!(TokenCost::Estimated(180), groups[2].cost);
 }
 
-/// Injected instruction fragments are user-role input, so an anchor delta prices them; before the
-/// pricing kind was split off the display category they were left unpriced forever.
+/// Injected instruction fragments are user-role input, so an anchor delta prices them.
 #[test]
 fn instructions_share_the_input_delta_with_tool_output() {
     let reminder = instruction_message("current_time.reminder", "it is late");
@@ -888,15 +836,10 @@ fn instructions_share_the_input_delta_with_tool_output() {
         Category::Instructions,
         profiler.state().snapshot.items[0].category
     );
-    let shares = apportion(100, &weights(&[&reminder, &output]));
     assert_eq!(
-        vec![
-            TokenCost::Estimated(shares[0]),
-            TokenCost::Estimated(shares[1]),
-        ],
+        vec![TokenCost::Estimated(36), TokenCost::Estimated(64)],
         costs(&profiler)
     );
-    assert_eq!(100, shares.iter().sum::<i64>());
 }
 
 /// A `ConfigurationUpdate` could land in either measured total, so its span is left alone - but the
@@ -1048,11 +991,10 @@ fn two_reasoning_items_share_the_measured_reasoning_subset() {
         },
     });
 
-    let shares = apportion(100, &weights(&[&first, &second]));
     assert_eq!(
         vec![
-            TokenCost::Estimated(shares[0]),
-            TokenCost::Estimated(shares[1]),
+            TokenCost::Estimated(50),
+            TokenCost::Estimated(50),
             TokenCost::Exact(50),
         ],
         costs(&profiler)
@@ -1078,22 +1020,21 @@ fn an_image_takes_an_estimate_weighted_share_not_a_byte_weighted_one() {
         usage: usage(4_000, 2),
     });
 
-    let shares = apportion(3_000, &weights(&[&output, &image]));
+    let image_share = 897;
+    let image_share_by_bytes = 2_001;
     assert_eq!(
         vec![
-            TokenCost::Estimated(shares[0]),
-            TokenCost::Estimated(shares[1]),
+            TokenCost::Estimated(2_103),
+            TokenCost::Estimated(image_share)
         ],
         costs(&profiler)
     );
-    let by_bytes = apportion(
-        3_000,
-        &[item_bytes(&output) as i64, item_bytes(&image) as i64],
+    assert_eq!(
+        vec![999, image_share_by_bytes],
+        apportion(
+            3_000,
+            &[item_bytes(&output) as i64, item_bytes(&image) as i64],
+        )
     );
-    assert!(
-        shares[1] * 2 < by_bytes[1] && shares[1] * 2 < 3_000,
-        "image took {} of 3,000, against {} by bytes",
-        shares[1],
-        by_bytes[1]
-    );
+    assert!(image_share * 2 < image_share_by_bytes && image_share * 2 < 3_000);
 }

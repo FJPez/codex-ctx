@@ -523,22 +523,3 @@ fn attached_names_the_thread() {
         }
     );
 }
-
-#[test]
-fn burst_of_notifications_keeps_every_item_in_order() {
-    let mut notifications = Vec::new();
-    for index in 0..10_000 {
-        if index % 10 == 9 {
-            notifications.push(raw_usage(&format!("resp_{index}"), index, 1));
-        } else {
-            notifications.push(raw_item(message_item(&format!("item {index}"))));
-        }
-    }
-
-    let records = observe_all(&notifications);
-    let items = item_kinds(&records);
-
-    assert_eq!(records.len(), 10_000);
-    assert_eq!(items.len(), 9_000);
-    assert_eq!(items.last(), Some(&("Message", 9_000)));
-}

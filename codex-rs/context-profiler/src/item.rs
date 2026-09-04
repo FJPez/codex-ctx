@@ -22,8 +22,7 @@ pub enum PricingKind {
     Input,
     /// One response's own output, so that response's `output_tokens` prices it.
     Output,
-    /// If an attribution span contains an `Ambiguous` item, leave the entire span on its initial
-    /// estimates. Still record the usage anchor and advance the span boundary.
+    /// An `Ambiguous` item poisons its span, so the whole span stays estimated.
     Ambiguous,
 }
 

@@ -1324,17 +1324,10 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
 
 Noted so they are not re-derived; none affects correctness.
 
-- Rename `ContextProfiler::turn_index` (called for its side effect of opening an implicit turn in
-  two arms) to something like `ensure_open_turn`.
-- Three apportionment tests compute their expectations with `apportion` itself; add a literal
-  share to each when next touched.
-- Two live-trace fixture assertions (`13` anchors, `42` items) describe the record table, not the
-  fold; drop them.
-- Comment density in `profiler.rs` (`attribute_span`), `estimate.rs` (the calibration table
-  duplicates this spec), and `item.rs` (the span rule on the enum variant) is above the repo's
-  one-line style; keep the "what", cite this spec for the "why".
-- `costs`, `item_cost`/`estimated`, and `item_bytes`/`serialized_len` are duplicated between
-  `profiler_tests.rs` and `fixture_tests.rs`; a `#[cfg(test)]` support module would remove them.
+The rest (the `turn_index` rename, literal apportionment shares, the fixture shape assertions,
+comment density, and the helper duplication, which was judged not worth a support module) were
+closed on the tidy branch before M3.
+
 - `rebuild_aggregates` rebuilds every group after every item (quadratic over a session); fine
   today, revisit when long histories become a target (M4 pager).
 - The profiler makes no network calls by design. OpenAI's `POST /v1/responses/input_tokens`
