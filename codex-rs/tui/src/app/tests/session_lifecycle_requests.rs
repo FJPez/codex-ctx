@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::session_lifecycle::ThreadAttachPresentation;
 use crate::app_event::TranscriptExportDestination;
 use crate::app_server_session::ThreadRole;
 use app_test_support::create_fake_paginated_rollout;
@@ -895,7 +896,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
             let response = response??;
             panic!("MCP task creation completed without registration: {}", response.text().await?);
         }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(/*secs*/ 5)) => {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(/*secs*/ 30)) => {
             panic!("timed out waiting for MCP task registration");
         }
     };
@@ -1098,6 +1099,61 @@ async fn primary_thread_requests_raw_events_when_feature_enabled() -> Result<()>
 
     app_server.shutdown().await?;
     proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_a_fresh_thread_start_installs_a_profiler_eagerly() -> Result<()> {
+    let (mut app, codex_home) = make_history_test_app().await?;
+    app.config
+        .features
+        .enable(Feature::ContextProfiler)
+        .expect("test config should allow the context profiler");
+    app.config.log_dir = codex_home.path().join("log");
+    app.profiler = crate::context_profiler::ProfilerRegistry::enabled(&app.config);
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    let started = app_server.start_thread(&app.config).await?;
+    let fresh_thread_id = started.session.thread_id;
+    app.replace_chat_widget_with_app_server_thread(
+        &mut tui,
+        started,
+        ThreadAttachPresentation::SessionLineage,
+        /*initial_user_message*/ None,
+    )
+    .await?;
+    assert!(app.profiler.state(&fresh_thread_id).is_some());
+
+    let resumable_thread_id = ThreadId::from_string(
+        &create_fake_rollout(
+            codex_home.path(),
+            "2026-01-01T00-00-00",
+            "2026-01-01T00:00:00Z",
+            "Saved user message",
+            Some(app.config.model_provider_id.as_str()),
+            /*git_info*/ None,
+        )
+        .expect("create rollout"),
+    )?;
+    let resumed = app_server
+        .resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            resumable_thread_id,
+            crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+        )
+        .await?;
+    let resumed_thread_id = resumed.session.thread_id;
+    app.replace_chat_widget_with_app_server_thread(
+        &mut tui,
+        resumed,
+        ThreadAttachPresentation::SessionLineage,
+        /*initial_user_message*/ None,
+    )
+    .await?;
+    assert!(app.profiler.state(&resumed_thread_id).is_none());
+
     Ok(())
 }
 

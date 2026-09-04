@@ -356,6 +356,8 @@ pub(crate) struct AppServerStartedThread {
     pub(crate) turns: Vec<Turn>,
     pub(crate) blocks_direct_input: bool,
     pub(crate) task_tools_available: bool,
+    /// True only for threads this app started fresh, which alone can claim a profiler baseline.
+    pub(crate) freshly_started: bool,
 }
 
 pub(crate) fn source_agent_path(source: &SessionSource) -> Option<String> {
@@ -2097,6 +2099,7 @@ async fn started_thread_from_start_response(
         turns: response.thread.turns,
         blocks_direct_input,
         task_tools_available: false,
+        freshly_started: true,
     })
 }
 
@@ -2115,6 +2118,7 @@ async fn started_thread_from_resume_response(
         turns: response.thread.turns,
         blocks_direct_input,
         task_tools_available: false,
+        freshly_started: false,
     })
 }
 
@@ -2133,6 +2137,7 @@ async fn started_thread_from_fork_response(
         turns: response.thread.turns,
         blocks_direct_input,
         task_tools_available: false,
+        freshly_started: false,
     })
 }
 
