@@ -209,9 +209,10 @@ the rollout path converge on the same ingest API - `RolloutItem::ResponseItem(en
 **Payload-bounded, not memory-bounded.** Item payloads are summarised at ingest and discarded, so
 memory does not scale with tool-output size - which is what matters, since the TUI already excludes
 raw items from its replay buffer for exactly that reason (`tui/src/app/thread_events.rs:154`). But
-we do retain every `ItemSummary`, `TurnDelta` and `UsageSnapshot`, so memory remains
-O(events). Fine for the MVP because summaries are tiny; capping sealed-epoch detail and anchor
-history later needs no change to the public model.
+we do retain every `ItemSummary` and `TurnDelta`, so memory remains O(items + turns). Anchors are
+not retained - only the latest one and the running residual are - so anchor density costs nothing.
+Fine for the MVP because summaries are tiny; capping sealed-epoch detail later needs no change to
+the public model.
 
 **Feature-flagged.** `rawResponseItem/*` is internal-only and listed in `AGENTS.md:106` as a
 breaking-change surface.
@@ -376,7 +377,7 @@ double-count every anchor.
 **No merge is needed.** Raw usage arrives first and carries no window; the window arrives later on
 `thread/tokenUsage/updated`. Rather than buffer an anchor so a window can be folded into it, the
 adapter emits the two independently - `Usage` from `rawResponse/completed`, `WindowUpdated` from
-`thread/tokenUsage/updated` - and the profiler keeps the latest window alongside the anchor list.
+`thread/tokenUsage/updated` - and the profiler keeps the latest window alongside the latest anchor.
 That also keeps the window correct across a mid-session `/model` switch.
 
 `RawResponseCompletedNotification.usage` is `Option<…>`. When it is `None` — cancelled or failed
@@ -410,6 +411,12 @@ fields, `items_seq`), `missing_usage`, `window_updated` (`window`, `matches_anch
 once and drops the writer - the session is never degraded to protect a trace.
 `specs/tools/analyse_capture.py` reads this format directly, tolerating a malformed final line
 only (an interrupted write; anything earlier is corruption and fails loudly).
+
+**The trace is derived off the primary path, never on it.** The adapter's job is to yield a
+`ProfilerEvent`; the registry folds that event first and only then, if a writer exists, writes the
+redacted record. A trace that cannot be opened or written therefore never disables profiling - the
+worst case is a missing file. It is retained through M6 and reconsidered after dogfooding, against
+one question: did it diagnose anything.
 
 `items_seq` counts observed raw items only - it is never a server context size. Hidden context
 (base instructions, tool schemas) is request scaffolding *beside* the item list, not a set of
@@ -656,7 +663,7 @@ the first model response, so `last_in_turn − first_in_turn` silently omits eve
 itself contributed - catastrophically so on turn one, where it would omit the entire initial
 context. Capturing the previous global anchor on `TurnStarted` makes
 `measured_after − measured_before` mean what it claims: the change in measured active context
-across the whole turn. The intermediate anchors still exist for reconciliation.
+across the whole turn. Intermediate anchors still price the items in their own spans.
 
 ```rust
 /// What `/ctx` renders. Read back via `ContextProfiler::state()`.
@@ -707,23 +714,29 @@ pub struct ProfilerState {
     /// Surfaced in `/ctx`: items with one or more classification uncertainties,
     /// counted at most once per item.
     pub classification_warning_count: u32,
-    /// Reconciliation input, not diagnostics.
-    pub anchors: Vec<UsageSnapshot>,
+}
+
+/// Whether this profiler saw the session from its first item. Passed in by the
+/// caller, never inferred: only the TUI knows whether it started the thread.
+pub enum ObservationStart {
+    SessionStart,
+    MidStream,
 }
 ```
 
 **`hidden_tokens()` and `baseline_tokens` are the same quantity by two routes** - one from the
-first-request decomposition, one from the first-anchor residual. They must agree. The accumulator
-computes `baseline_tokens` from the anchor residual and asserts consistency with
-`initial_context.hidden_tokens()`; a material disagreement is a bug in one of the two, and an
-M1 test asserts it.
+first-request decomposition, one from the first-anchor residual. When a baseline is established,
+`hidden_tokens()` equals `baseline_tokens`. Their agreement is an *eligibility condition* checked
+at the first anchor without panicking: a disagreement leaves both `baseline_tokens` and
+`initial_context` as `None` rather than publishing a number one of the two routes contradicts. A
+behaviour test covers both outcomes.
 
 ### What an earlier draft carried, and why it is gone
 
 | Cut | Why |
 |---|---|
 | `ProfilerProvenance`, `SnapshotSource` | Every field is M5/M7. `Mixed` is, by our own M7 analysis, unreachable from a cold resume - yet a `mixed` snapshot test was mandatory. |
-| `ProfilerDiagnostics` as a struct | Two of its five counters survive. A struct for two fields plus the reconciliation input was misfiling `anchors` under "anomaly counters". |
+| `ProfilerDiagnostics` as a struct | Two of its five counters survive, and a struct for two fields earns nothing. |
 | `turn_id_mismatch_count` | Added *because* Spike A measured **zero** mismatches, and §4.3 explains why they cannot occur. |
 | `out_of_turn_item_count`, `dropped_event_count` | No evidence of the first; the second restates `invalidated` as a number. |
 | `AttributionCompleteness` | Three states, one undefined (`IncompleteReason` was never written down). `Degraded` is a caller-side branch: the TUI knows at thread start whether it set the flag. |
@@ -929,30 +942,70 @@ output that becomes the next request's input. `total_tokens` equals `input + out
 (25,230 + 192 = 25,422; 29,137 + 93 = 29,230). Anchoring on the total removes the need for any
 "which items were outputs" bookkeeping.
 
-**Re-solve at every anchor**, never once:
-
 ```
-residual_n  = reported_n − Σ est(items ≤ seq_n)     // = baseline + drift_n
-baseline    = residual at the first anchor of epoch 0
-              in a Live session with ≥1 item observed
-drift_n     = residual_n − baseline
+residual_n  = reported_n − attributed_n            // attributed = Σ cost(items ≤ seq_n)
+baseline    = residual at the first anchor of a session observed from its start,
+              and only there
+drift_n     = residual_n − baseline                // latest value only, never a history
 ```
 
-The baseline reference is the **first trustworthy anchor**, deliberately not a minimum over early
-anchors - `min` is wrong whenever the estimator over-estimates, which is the case to expect here.
-Reasoning in findings §9.
+**The baseline comes from the first anchor of a session we watched from its start, or from
+nowhere.** It is never substituted from a later anchor that happens to look clean: any later
+anchor's residual already carries accumulated estimator error, and a "clean" span is not evidence
+that the prefix before it was priced correctly. `min` over early anchors is wrong for the same
+reason, and additionally wrong whenever the estimator over-estimates, which is the case to expect
+here. Reasoning in findings §9.
 
-A hydrated session (M7) has no clean baseline anchor, since its prefix was never observed. That is
-an M7 problem, not an MVP one.
+**Eligibility is a conjunction, checked once at the first anchor.** All of the following must hold:
 
-**Upgrade path, not built for the MVP:** with roughly four anchors per turn, regressing `residual_n`
-against `items_n` yields the baseline as the intercept and per-item estimator bias as the slope.
-The M1 dataset will show whether the first-anchor estimate is systematically off. If it is not, we
-never build the fit.
+- the profiler was constructed with `ObservationStart::SessionStart`;
+- this is the first anchor of the session;
+- the open turn has index 0 and no turn closed before it;
+- no `UsageMissing` was observed before it;
+- at least one item has been observed;
+- no `Ambiguous` item sits in the prefix `1..=items_seen`;
+- the two routes agree (below);
+- the residual is not negative.
 
-Estimator errors are additive, so drift grows with item count. Solving once would freeze the
-baseline at whatever the first anchor said and let drift silently contaminate it. `drift_n / Σ est`
-also yields an estimator error ratio worth surfacing as a confidence indicator.
+**If any condition fails, the session simply has no baseline.** `baseline_tokens` and
+`initial_context` stay `None` for the rest of the session - the startup section of `/ctx` is
+unavailable and says so. Nothing else degrades: item attribution continues exactly as before, and
+`drift_tokens` stays `0`, because drift is defined relative to a baseline and there is nothing to
+be relative to.
+
+**One private flag tracks this**, `baseline_pending: bool` on `ContextProfiler`, initialised from
+`ObservationStart`. It is cleared by `UsageMissing`, by a turn closing, and by the first anchor
+(whether or not that anchor produced a baseline). There are no new public diagnostics: the visible
+consequence is `baseline_tokens: None`.
+
+**Drift is the latest value, not a series.** At every accepted anchor,
+`drift = reported_context_tokens − attributed_tokens − baseline`. That includes anchors whose span
+was `Ambiguous` - those items keep their estimates and the resulting error lands in drift, which is
+the point of having the number - and anchors whose cross-turn delta was negative. Drift may
+therefore be negative, and is rendered signed rather than clamped.
+
+**`ObservationStart { SessionStart, MidStream }` is a constructor argument**, not something the
+profiler can infer. The TUI passes `SessionStart` only for a thread the app itself started fresh.
+That fact travels on `AppServerStartedThread.freshly_started`, set only by the `thread/start`
+response producer and consumed by the central profiler install function and the startup handler,
+both before any buffered events drain. Resume, fork, and lazy attachment to an already-running
+thread are all `MidStream`.
+
+**Two-route consistency is an eligibility condition, not a runtime assertion.** The residual route
+(`reported − attributed`) and the first-request route
+(`input − estimated user − estimated instructions`, i.e. `InitialContextSummary::hidden_tokens()`)
+must be equal; if they are not, no baseline is established and nothing panics. They diverge for
+structural reasons we can enumerate: the prefix holding an input-kind item that is neither
+`UserMessage` nor `Instructions` (a compaction summary, say), or a response that produced no output
+items.
+
+A hydrated session (M7) has no eligible first anchor by construction, since its prefix was never
+observed. That is an M7 problem, not an MVP one.
+
+Estimator errors are additive, so drift grows with item count. Recomputing it at every anchor is
+what keeps that growth visible in drift instead of silently contaminating a baseline that was fixed
+once and correctly. `drift_n / attributed_n` also yields an estimator error ratio worth surfacing as
+a confidence indicator.
 
 Anchor density is per response, not per turn - a single turn produced four anchors in testing, so
 the decomposition has plenty of data.
@@ -1206,8 +1259,8 @@ plaintext (`rollout-trace/README.md:3-8`).
 | M2 | The crate, in four reviewed stages - see below | Next |
 | M3 | Reconciliation: continuous re-solve, baseline/drift, `InitialContextSummary` | |
 | M4 | `/ctx` inline card + `insta` coverage | |
-| M5 | Epochs and compaction: sealing, before/after, turns spanning a boundary, compaction-kind inference | |
-| M6 | Dogfood on real work; validate attribution; find out which views are actually used | |
+| M5 | Epochs and compaction: sealing, before/after, turns spanning a boundary, compaction-kind inference; surface core's `context_window_id` and `window_number` on the raw completed event | |
+| M6 | Dogfood on real work; validate attribution; find out which views are actually used; reconsider the JSONL trace after dogfooding | |
 | M7 | Rollout hydration - `RolloutItem` adapter, provenance, live-vs-rollout equivalence | |
 
 ### M2, staged
@@ -1312,7 +1365,16 @@ way, and implementing it is cheaper than instrumenting to count occurrences.
 5. **`ConfigurationUpdate` token cost.** `PricingKind::Ambiguous` until a capture shows how
    `input_tokens` reflects it: core retains it only with harness provenance, and being serialized
    into a request does not mean being tokenized by JSON size.
-6. **Three context-rewrite mechanisms, not two** (M5). Local summary compaction, remote summary
+6. **Sampling retries fold two attempts into one span.** Core persists each output item the moment
+   it streams (`core/src/stream_events_utils.rs`, `handle_output_item_done`), so a retried request
+   re-sends the failed attempt's partial output as input, and the failed attempt emits no
+   `rawResponse/completed` to close a span. The profiler therefore prices both attempts as one span
+   and misprices its input/output split; a retry during the very first response would skew the
+   baseline. Not built for the MVP - the eventual fix is a core-emitted attempt boundary on the raw
+   stream, mapped to `UsageMissing`.
+7. **Drift may be negative** - a cross-turn shrink or an over-estimating prefix both produce one -
+   and the card renders it signed rather than clamping it to zero.
+8. **Three context-rewrite mechanisms, not two** (M5). Local summary compaction, remote summary
    compaction, and the **fresh window**: the `new_context` tool or a token-budget rollover
    (`core/src/compact_token_budget.rs`) installs a rebuilt initial context without summarizing. It
    emits the `ContextCompaction` turn item with empty compaction metadata and no summarizing

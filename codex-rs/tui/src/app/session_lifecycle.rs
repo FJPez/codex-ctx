@@ -744,6 +744,9 @@ impl App {
         match result {
             Ok(started) => {
                 let thread_id = started.session.thread_id;
+                if started.freshly_started {
+                    self.profiler.thread_started(&thread_id);
+                }
                 if started.task_tools_available {
                     app_server.remember_task_tool_thread(thread_id);
                     self.chat_widget.set_task_mentions_enabled(/*enabled*/ true);
@@ -944,6 +947,9 @@ impl App {
         // resume/fork flows pass `None` so they cannot replay old history and then auto-submit a new
         // user turn by accident.
         self.reset_thread_event_state();
+        if started.freshly_started {
+            self.profiler.thread_started(&started.session.thread_id);
+        }
         let init = self.chatwidget_init_for_forked_or_resumed_thread(
             tui,
             self.config.clone(),

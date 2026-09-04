@@ -151,6 +151,11 @@ fn usage(total: i64, items_seq: u64) -> UsageSnapshot {
     anchor(total, total, /*output*/ 0, items_seq)
 }
 
+/// These tests model isolated spans rather than a session's first request.
+fn profiler() -> ContextProfiler {
+    ContextProfiler::new(ObservationStart::MidStream)
+}
+
 fn observe_items(profiler: &mut ContextProfiler, turn_id: &str, items: &[&ResponseItem]) {
     for item in items {
         profiler.observe(ProfilerEvent::Item { turn_id, item });
@@ -210,16 +215,15 @@ fn single_turn_folds_items_anchor_and_turn_delta() {
     let reasoning = reasoning_item();
     let answer = message_item("done");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&user, &reasoning, &answer]);
-    let usage = UsageSnapshot {
-        reasoning_output_tokens: 30,
-        ..anchor(1_200, 1_200, 40, 3)
-    };
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
-        usage: usage.clone(),
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 30,
+            ..anchor(1_200, 1_200, 40, 3)
+        },
     });
     profiler.observe(ProfilerEvent::TurnEnded {
         turn_id: TURN,
@@ -262,7 +266,6 @@ fn single_turn_folds_items_anchor_and_turn_delta() {
         invalidated: None,
         classification_warning_count: 0,
         unsizable_item_count: 0,
-        anchors: vec![usage],
     };
     assert_eq!(&expected, profiler.state());
 }
@@ -273,7 +276,7 @@ fn call_and_output_share_one_group_across_turns() {
     let filler = message_item("thinking out loud");
     let output = custom_tool_call_output("call_1");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Item {
         turn_id: TURN,
@@ -312,7 +315,7 @@ fn call_and_output_share_one_group_across_turns() {
 fn item_without_open_turn_opens_implicit_turn() {
     let item = message_item("mid-stream attach");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::Item {
         turn_id: TURN,
         item: &item,
@@ -342,7 +345,7 @@ fn invalidation_freezes_everything_but_the_window() {
     let first = message_item("before");
     let second = message_item("after");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Item {
         turn_id: TURN,
@@ -372,7 +375,8 @@ fn invalidation_freezes_everything_but_the_window() {
     frozen.cost = TokenCost::Exact(55);
     let state = profiler.state();
     assert_eq!(vec![frozen], state.snapshot.items);
-    assert_eq!(vec![anchor(900, 900, 55, 1)], state.anchors);
+    // The second anchor never landed, so the reported total is still the first one's.
+    assert_eq!(Some(900), state.snapshot.reported_context_tokens);
     assert_eq!(Some(272_000), state.snapshot.window);
     assert_eq!(Some(InvalidationReason::Compacted), state.invalidated);
 }
@@ -381,7 +385,7 @@ fn invalidation_freezes_everything_but_the_window() {
 fn interrupted_turn_leaves_both_turns_unmeasured() {
     let item = message_item("interrupted");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Item {
         turn_id: TURN,
@@ -414,7 +418,7 @@ fn interrupted_turn_leaves_both_turns_unmeasured() {
 fn forged_usage_seq_invalidates_without_anchoring() {
     let item = message_item("one item");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Item {
         turn_id: TURN,
@@ -433,7 +437,7 @@ fn forged_usage_seq_invalidates_without_anchoring() {
         }),
         state.invalidated
     );
-    assert_eq!(Vec::<UsageSnapshot>::new(), state.anchors);
+    assert_eq!(None, state.snapshot.reported_context_tokens);
     assert_eq!(item_cost(&item), state.snapshot.items[0].cost);
 }
 
@@ -445,7 +449,7 @@ fn missing_usage_isolates_the_next_response() {
     let output_a = custom_tool_call_output("call_a");
     let reasoning_b = reasoning_item();
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted {
         turn_id: OTHER_TURN,
     });
@@ -507,7 +511,7 @@ fn missing_usage_isolates_the_next_response() {
 fn missing_usage_at_turn_end_clears_both_boundaries() {
     let item = message_item("last response");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
@@ -544,7 +548,7 @@ fn capture_shape_prices_the_tool_output_from_the_anchor_delta() {
     let output = custom_tool_call_output("call_1");
     let second_reasoning = reasoning_item();
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     let first_span: Vec<&ResponseItem> =
         prompts.iter().chain([&reasoning, &answer, &call]).collect();
@@ -586,7 +590,7 @@ fn first_anchor_prices_output_items_without_a_previous_anchor() {
     let reasoning = reasoning_item();
     let call = custom_tool_call("call_1");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&reasoning]);
     profiler.observe(ProfilerEvent::Usage {
@@ -614,7 +618,7 @@ fn two_input_items_split_the_delta_by_estimate() {
     let small = sized_tool_output("call_1", 1);
     let big = sized_tool_output("call_2", 2 * envelope + 3);
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
@@ -640,7 +644,7 @@ fn equal_weights_hand_the_rounding_remainder_to_the_last_item() {
         .map(|n| sized_tool_output(&format!("call_{n}"), 8))
         .collect();
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
@@ -673,7 +677,7 @@ fn weightless_items_split_evenly_with_the_remainder_first() {
 fn a_negative_delta_leaves_the_estimate_in_place() {
     let output = custom_tool_call_output("call_1");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
@@ -694,7 +698,7 @@ fn items_stranded_by_an_interrupted_turn_are_never_repriced() {
     let stranded = custom_tool_call_output("call_2");
     let next_turn = custom_tool_call_output("call_3");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&anchored]);
     profiler.observe(ProfilerEvent::Usage {
@@ -734,7 +738,7 @@ fn repricing_rebuilds_the_aggregates_whole() {
     let reasoning = reasoning_item();
     let answer = message_item("done");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&reasoning, &answer]);
 
@@ -787,7 +791,7 @@ fn a_group_is_exact_only_when_every_member_is() {
     let shared_call = custom_tool_call("call_2");
     let shared_output = custom_tool_call_output("call_2");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&exact_call]);
     profiler.observe(ProfilerEvent::Usage {
@@ -820,7 +824,7 @@ fn instructions_share_the_input_delta_with_tool_output() {
     let reminder = instruction_message("current_time.reminder", "it is late");
     let output = custom_tool_call_output("call_1");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
@@ -850,7 +854,7 @@ fn an_ambiguous_item_leaves_its_span_estimated_and_the_next_span_recovers() {
     let poisoned = sized_tool_output("call_1", 4);
     let recovered = custom_tool_call_output("call_2");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
@@ -877,13 +881,13 @@ fn an_ambiguous_item_leaves_its_span_estimated_and_the_next_span_recovers() {
         costs(&profiler)
     );
     assert_eq!(0, state.classification_warning_count);
-    assert_eq!(3, state.anchors.len());
+    assert_eq!(Some(1_400), state.snapshot.reported_context_tokens);
 }
 
 /// The serde fallback item is the one shape whose arrival is itself the finding.
 #[test]
 fn an_unknown_item_type_is_counted_once() {
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&ResponseItem::Other]);
 
@@ -901,7 +905,7 @@ fn an_unknown_role_message_poisons_only_its_own_span() {
     let reasoning = reasoning_item();
     let later = reasoning_item();
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
@@ -937,7 +941,7 @@ fn reasoning_and_generated_output_are_priced_from_separate_measured_totals() {
     let reasoning = reasoning_item();
     let answer = message_item("done");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&reasoning, &answer]);
     profiler.observe(ProfilerEvent::Usage {
@@ -960,7 +964,7 @@ fn reasoning_and_generated_output_are_priced_from_separate_measured_totals() {
 fn reasoning_tokens_without_a_reasoning_item_are_not_given_to_the_generated_items() {
     let answer = message_item("done");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&answer]);
     profiler.observe(ProfilerEvent::Usage {
@@ -980,7 +984,7 @@ fn two_reasoning_items_share_the_measured_reasoning_subset() {
     let second = reasoning_item();
     let answer = message_item("done");
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&first, &second, &answer]);
     profiler.observe(ProfilerEvent::Usage {
@@ -1008,7 +1012,7 @@ fn an_image_takes_an_estimate_weighted_share_not_a_byte_weighted_one() {
     let output = sized_tool_output("call_1", 20_000);
     let image = image_message(40_000);
 
-    let mut profiler = ContextProfiler::new();
+    let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,

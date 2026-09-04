@@ -1,6 +1,15 @@
 use super::*;
+use crate::context_profiler::log::attached_record;
+use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
+use codex_app_server_protocol::TokenUsageBreakdown;
+use codex_app_server_protocol::Turn;
+use codex_app_server_protocol::TurnItemsView;
+use codex_app_server_protocol::TurnStartedNotification;
+use codex_app_server_protocol::TurnStatus;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 use pretty_assertions::assert_eq;
 use std::fs::OpenOptions;
@@ -28,7 +37,83 @@ fn registry_in(dir: &Path) -> ProfilerRegistry {
     ProfilerRegistry {
         threads: HashMap::new(),
         writer: Some(ProfilerLog::open(dir).expect("trace log opens")),
+        enabled: true,
     }
+}
+
+/// A first request: one turn, one user item, and the anchor that prices it.
+/// The anchor carries no output tokens, so the whole unattributed residual is the baseline.
+fn first_request(thread_id: ThreadId) -> Vec<ServerNotification> {
+    vec![
+        turn_started(thread_id),
+        user_item(thread_id, "hello"),
+        raw_usage(
+            thread_id, /*input_tokens*/ 1_200, /*output_tokens*/ 0,
+        ),
+    ]
+}
+
+fn user_item(thread_id: ThreadId, text: &str) -> ServerNotification {
+    ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+        thread_id: thread_id.to_string(),
+        turn_id: "tu_1".to_string(),
+        item: ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![ContentItemKind("user.text".to_string())]),
+                    ..Default::default()
+                },
+            ),
+        },
+    })
+}
+
+fn turn_started(thread_id: ThreadId) -> ServerNotification {
+    ServerNotification::TurnStarted(TurnStartedNotification {
+        thread_id: thread_id.to_string(),
+        turn: Turn {
+            id: "tu_1".to_string(),
+            items: Vec::new(),
+            items_view: TurnItemsView::NotLoaded,
+            status: TurnStatus::InProgress,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+        },
+    })
+}
+
+fn raw_usage(thread_id: ThreadId, input_tokens: i64, output_tokens: i64) -> ServerNotification {
+    ServerNotification::RawResponseCompleted(RawResponseCompletedNotification {
+        thread_id: thread_id.to_string(),
+        turn_id: "tu_1".to_string(),
+        response_id: "resp_a".to_string(),
+        usage: Some(TokenUsageBreakdown {
+            total_tokens: input_tokens + output_tokens,
+            input_tokens,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens,
+            reasoning_output_tokens: 0,
+        }),
+        usage_metadata: None,
+    })
+}
+
+fn folded_items(registry: &ProfilerRegistry, thread_id: &ThreadId) -> usize {
+    registry
+        .state(thread_id)
+        .expect("thread is profiled")
+        .snapshot
+        .items
+        .len()
 }
 
 fn trace_path(dir: &Path) -> PathBuf {
@@ -203,6 +288,7 @@ fn a_failed_write_drops_the_writer() {
     let mut registry = ProfilerRegistry {
         threads: HashMap::new(),
         writer: Some(ProfilerLog::with_file(read_only)),
+        enabled: true,
     };
 
     registry.observe(
@@ -220,16 +306,83 @@ fn a_failed_write_drops_the_writer() {
     registry.broadcast_lagged(1);
 
     assert_eq!(std::fs::read_to_string(&path).expect("trace readable"), "");
+    assert_eq!(folded_items(&registry, &thread_id), 2);
+}
+
+#[tokio::test]
+async fn a_failed_open_keeps_profiling() {
+    let dir = TempDir::new().expect("tempdir");
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, "").expect("seed blocking file");
+    let mut config = Config::load_default_with_cli_overrides_for_codex_home(
+        dir.path().to_path_buf(),
+        Vec::new(),
+    )
+    .await
+    .expect("config");
+    // A directory cannot be created under a regular file, so the trace log cannot open.
+    config.log_dir = blocker.join("traces");
+    let thread_id = ThreadId::new();
+    let mut registry = ProfilerRegistry::enabled(&config);
+    assert!(registry.writer.is_none());
+
+    for notification in first_request(thread_id) {
+        registry.observe(&thread_id, &notification, /*allow_create*/ true);
+    }
+
+    assert!(registry.state(&thread_id).is_some());
+    assert_eq!(folded_items(&registry, &thread_id), 1);
+}
+
+#[test]
+fn thread_started_creates_a_session_start_profiler() {
+    let dir = TempDir::new().expect("tempdir");
+    let thread_id = ThreadId::new();
+    let mut registry = registry_in(dir.path());
+
+    registry.thread_started(&thread_id);
+    for notification in first_request(thread_id) {
+        registry.observe(&thread_id, &notification, /*allow_create*/ true);
+    }
+
+    assert!(
+        registry
+            .state(&thread_id)
+            .expect("thread is profiled")
+            .snapshot
+            .baseline_tokens
+            .is_some()
+    );
+    assert_eq!(kinds(dir.path())[0], "attached");
+}
+
+#[test]
+fn lazy_attachment_is_mid_stream() {
+    let dir = TempDir::new().expect("tempdir");
+    let thread_id = ThreadId::new();
+    let mut registry = registry_in(dir.path());
+
+    for notification in first_request(thread_id) {
+        registry.observe(&thread_id, &notification, /*allow_create*/ true);
+    }
+
+    assert!(
+        registry
+            .state(&thread_id)
+            .expect("thread is profiled")
+            .snapshot
+            .baseline_tokens
+            .is_none()
+    );
 }
 
 #[test]
 fn the_log_appends_one_json_object_per_line() {
     let dir = TempDir::new().expect("tempdir");
     let log = ProfilerLog::open(dir.path()).expect("trace log opens");
-    let adapter = ThreadProfilerAdapter::new();
 
     for thread_id in ["th_1", "th_2", "th_3"] {
-        log.write(&adapter.attached(thread_id)).expect("write");
+        log.write(&attached_record(thread_id)).expect("write");
     }
 
     assert_eq!(

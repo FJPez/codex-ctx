@@ -27,6 +27,7 @@ pub use item::TokenCost;
 pub use kind::call_id;
 pub use kind::item_kind;
 pub use profiler::ContextProfiler;
+pub use profiler::ObservationStart;
 pub use snapshot::ContextSnapshot;
 pub use snapshot::InitialContextSummary;
 pub use snapshot::ProfilerState;

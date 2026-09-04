@@ -1,4 +1,8 @@
 use super::*;
+use crate::context_profiler::log::RecordedEvent;
+use crate::context_profiler::log::RecordedKind;
+use crate::context_profiler::log::attached_record;
+use crate::context_profiler::log::to_record;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
@@ -172,7 +176,11 @@ fn observe_all(notifications: &[ServerNotification]) -> Vec<RecordedEvent> {
     let mut adapter = ThreadProfilerAdapter::new();
     notifications
         .iter()
-        .filter_map(|notification| adapter.observe(notification))
+        .filter_map(|notification| {
+            adapter
+                .observe(notification)
+                .map(|observation| to_record(THREAD, &observation))
+        })
         .collect()
 }
 
@@ -464,7 +472,7 @@ fn serializes_one_line_per_variant() {
         }),
         turn_completed(TurnStatus::Completed),
     ]);
-    let lines: Vec<String> = std::iter::once(ThreadProfilerAdapter::new().attached(THREAD))
+    let lines: Vec<String> = std::iter::once(attached_record(THREAD))
         .chain(records)
         .map(|record| serde_json::to_string(&record).expect("record serializes"))
         .collect();
@@ -488,8 +496,14 @@ fn serializes_one_line_per_variant() {
 fn invalidate_clears_the_anchor() {
     let mut adapter = ThreadProfilerAdapter::new();
     adapter.observe(&raw_usage("resp_a", 100, 10));
-    let invalidated = adapter.invalidate(THREAD, InvalidationReason::EventsDropped { skipped: 3 });
-    let window = adapter.observe(&token_usage(110, 258_400));
+    let invalidated = to_record(
+        THREAD,
+        &adapter.invalidate(InvalidationReason::EventsDropped { skipped: 3 }),
+    );
+    let window_update = token_usage(110, 258_400);
+    let window = adapter
+        .observe(&window_update)
+        .map(|observation| to_record(THREAD, &observation));
 
     assert_eq!(
         invalidated,
@@ -512,10 +526,8 @@ fn invalidate_clears_the_anchor() {
 
 #[test]
 fn attached_names_the_thread() {
-    let adapter = ThreadProfilerAdapter::new();
-
     assert_eq!(
-        adapter.attached(THREAD),
+        attached_record(THREAD),
         RecordedEvent {
             thread_id: THREAD.to_string(),
             turn_id: None,
