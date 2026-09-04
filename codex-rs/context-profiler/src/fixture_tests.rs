@@ -2,12 +2,17 @@
 //!
 //! Every byte size and every anchor number below is transcribed from a real capture, so a change in
 //! attribution shows up as a disagreement with measured reality rather than with a hand-written
-//! expectation. Item payloads are padding: only the serialised length is faithful.
+//! expectation. Item payloads are padding: only the serialized length is faithful.
 
 use super::*;
+use crate::classify::classify;
+use crate::estimate::text_tokens;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::ResponseItem;
 use pretty_assertions::assert_eq;
 
 /// Stand-ins for the live capture's turn ids; the fold only needs them to be distinct.
@@ -17,9 +22,12 @@ const WINDOW: i64 = 258_400;
 
 /// The item shapes the captures contain. Captures record a kind and a byte count, never a role, so
 /// message roles are inferred from position: the message opening a turn is the user's.
+///
+/// A user message carries the rollout's own `content_item_kinds`, one per content entry, which is
+/// what the classifier reads; the padding is split across those entries so the parts line up.
 #[derive(Debug, Clone)]
 enum Kind {
-    UserMessage,
+    UserMessage(&'static [&'static str]),
     AgentMessage,
     Reasoning,
     ToolCall(&'static str),
@@ -29,19 +37,22 @@ enum Kind {
 impl Kind {
     fn build(&self, payload: String) -> ResponseItem {
         match self {
-            Self::UserMessage => ResponseItem::Message {
+            Self::UserMessage(kinds) => ResponseItem::Message {
                 id: None,
                 role: "user".to_string(),
-                content: vec![ContentItem::InputText { text: payload }],
+                content: split(&payload, kinds.len())
+                    .into_iter()
+                    .map(|text| ContentItem::InputText { text })
+                    .collect(),
                 phase: None,
-                internal_chat_message_metadata_passthrough: None,
+                internal_chat_message_metadata_passthrough: metadata(kinds),
             },
             Self::AgentMessage => ResponseItem::Message {
                 id: None,
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText { text: payload }],
                 phase: None,
-                internal_chat_message_metadata_passthrough: None,
+                internal_chat_message_metadata_passthrough: metadata(&["unknown"]),
             },
             Self::Reasoning => ResponseItem::Reasoning {
                 id: None,
@@ -73,18 +84,46 @@ impl Kind {
     }
 }
 
+fn metadata(kinds: &[&str]) -> Option<InternalChatMessageMetadataPassthrough> {
+    Some(InternalChatMessageMetadataPassthrough {
+        content_item_kinds: Some(
+            kinds
+                .iter()
+                .map(|kind| ContentItemKind((*kind).to_string()))
+                .collect(),
+        ),
+        ..Default::default()
+    })
+}
+
+/// Splits ASCII padding into `parts` chunks, remainder first; the total length is unchanged, so the
+/// item still serializes to exactly the size the capture recorded.
+fn split(payload: &str, parts: usize) -> Vec<String> {
+    let base = payload.len() / parts;
+    let remainder = payload.len() % parts;
+    let mut rest = payload;
+    (0..parts)
+        .map(|index| {
+            let len = base + usize::from(index < remainder);
+            let (chunk, tail) = rest.split_at(len);
+            rest = tail;
+            chunk.to_string()
+        })
+        .collect()
+}
+
 fn serialized_len(item: &ResponseItem) -> usize {
     serde_json::to_vec(item).expect("serializable item").len()
 }
 
-/// Builds an item whose serialised length is exactly `bytes`, by padding its string payload.
+/// Builds an item whose serialized length is exactly `bytes`, by padding its string payload.
 ///
 /// The padding is unescaped ASCII, so one character costs one byte and the arithmetic is exact.
 fn sized(kind: Kind, bytes: usize) -> ResponseItem {
     let overhead = serialized_len(&kind.build(String::new()));
     assert!(
         bytes >= overhead,
-        "{kind:?} serialises to {overhead} bytes empty, so it cannot be sized to {bytes}"
+        "{kind:?} serializes to {overhead} bytes empty, so it cannot be sized to {bytes}"
     );
     let item = kind.build("x".repeat(bytes - overhead));
     assert_eq!(
@@ -184,6 +223,16 @@ fn fold(records: &[Record]) -> ContextProfiler {
     profiler
 }
 
+/// The initial estimate an item carries until an anchor prices it.
+fn estimated(item: &ResponseItem) -> TokenCost {
+    let classification = classify(item);
+    TokenCost::Estimated(item_tokens(
+        item,
+        &classification.parts,
+        serialized_len(item),
+    ))
+}
+
 fn costs(state: &ProfilerState) -> Vec<TokenCost> {
     state.snapshot.items.iter().map(|item| item.cost).collect()
 }
@@ -226,6 +275,8 @@ fn the_measured_ladder_prices_every_tool_output_to_the_token() {
     let state = fold(&ladder_records()).state().clone();
 
     // Each span holds one tool output and one reasoning item, so both take a whole measured total.
+    // The captures never transcribed `output_tokens_details.reasoning_tokens`, so the anchors
+    // report zero and the reasoning item takes the whole `output_tokens` as the only output item.
     let expected = vec![
         TokenCost::Exact(1_040),
         TokenCost::Exact(93),
@@ -248,119 +299,102 @@ fn the_measured_ladder_prices_every_tool_output_to_the_token() {
     );
 }
 
+/// The rollout's kinds for the merged opening fragment. `host_skills.instructions` is a name
+/// upstream has since retired: a kind the classifier has never heard of must still read as an
+/// instruction, silently.
+const FIRST_TURN_INSTRUCTION_KINDS: &[&str] = &[
+    "host_skills.instructions",
+    "permissions.instructions",
+    "collaboration_mode.instructions",
+    "apps.instructions",
+    "plugins.usage_instructions",
+];
+
 /// The live capture, record for record: two completed turns, 42 items, 13 anchors.
 fn live_trace_records() -> Vec<Record> {
     vec![
         Record::TurnStarted(TURN_1),
-        item(TURN_1, Kind::UserMessage, 33_504),
-        item(TURN_1, Kind::UserMessage, 2_604),
-        item(TURN_1, Kind::UserMessage, 582),
-        item(TURN_1, Kind::UserMessage, 25_542),
-        item(TURN_1, Kind::UserMessage, 357),
+        item(
+            TURN_1,
+            Kind::UserMessage(FIRST_TURN_INSTRUCTION_KINDS),
+            33_504,
+        ),
+        item(
+            TURN_1,
+            Kind::UserMessage(&["multi_agent.role_instructions"]),
+            2_604,
+        ),
+        item(
+            TURN_1,
+            Kind::UserMessage(&["multi_agent.mode_instructions"]),
+            582,
+        ),
+        item(
+            TURN_1,
+            Kind::UserMessage(&["agents_md.instructions", "environments.environment_context"]),
+            25_542,
+        ),
+        item(TURN_1, Kind::UserMessage(&["user.text"]), 357),
         item(TURN_1, Kind::Reasoning, 1_677),
         item(TURN_1, Kind::AgentMessage, 446),
         item(TURN_1, Kind::ToolCall("call_1"), 570),
         usage_at(TURN_1, 25_328, 25_180, 148, 8),
-        item(
-            TURN_1,
-            Kind::ToolOutput("call_1"),
-            4_794,
-        ),
+        item(TURN_1, Kind::ToolOutput("call_1"), 4_794),
         window(TURN_1),
         item(TURN_1, Kind::ToolCall("call_2"), 510),
         usage_at(TURN_1, 26_437, 26_368, 69, 10),
-        item(
-            TURN_1,
-            Kind::ToolOutput("call_2"),
-            696,
-        ),
+        item(TURN_1, Kind::ToolOutput("call_2"), 696),
         window(TURN_1),
         item(TURN_1, Kind::Reasoning, 1_721),
         item(TURN_1, Kind::ToolCall("call_3"), 606),
         usage_at(TURN_1, 26_674, 26_536, 138, 13),
-        item(
-            TURN_1,
-            Kind::ToolOutput("call_3"),
-            29_430,
-        ),
+        item(TURN_1, Kind::ToolOutput("call_3"), 29_430),
         window(TURN_1),
         item(TURN_1, Kind::AgentMessage, 1_095),
         usage_at(TURN_1, 33_318, 33_150, 168, 15),
         window(TURN_1),
         turn_ended(TURN_1, /*completed*/ true),
         Record::TurnStarted(TURN_2),
-        item(TURN_2, Kind::UserMessage, 395),
+        item(TURN_2, Kind::UserMessage(&["user.text"]), 395),
         item(TURN_2, Kind::Reasoning, 1_997),
         item(TURN_2, Kind::AgentMessage, 482),
         item(TURN_2, Kind::ToolCall("call_4"), 821),
         usage_at(TURN_2, 33_386, 33_113, 273, 19),
-        item(
-            TURN_2,
-            Kind::ToolOutput("call_4"),
-            4_903,
-        ),
+        item(TURN_2, Kind::ToolOutput("call_4"), 4_903),
         window(TURN_2),
         item(TURN_2, Kind::Reasoning, 2_189),
         item(TURN_2, Kind::ToolCall("call_5"), 776),
         usage_at(TURN_2, 34_729, 34_451, 278, 22),
-        item(
-            TURN_2,
-            Kind::ToolOutput("call_5"),
-            41_448,
-        ),
+        item(TURN_2, Kind::ToolOutput("call_5"), 41_448),
         window(TURN_2),
         item(TURN_2, Kind::Reasoning, 2_425),
         item(TURN_2, Kind::ToolCall("call_6"), 528),
         usage_at(TURN_2, 43_905, 43_671, 234, 25),
-        item(
-            TURN_2,
-            Kind::ToolOutput("call_6"),
-            18_223,
-        ),
+        item(TURN_2, Kind::ToolOutput("call_6"), 18_223),
         window(TURN_2),
         item(TURN_2, Kind::Reasoning, 1_997),
         item(TURN_2, Kind::ToolCall("call_7"), 531),
         usage_at(TURN_2, 48_164, 47_992, 172, 28),
-        item(
-            TURN_2,
-            Kind::ToolOutput("call_7"),
-            36_533,
-        ),
+        item(TURN_2, Kind::ToolOutput("call_7"), 36_533),
         window(TURN_2),
         item(TURN_2, Kind::ToolCall("call_8"), 532),
         usage_at(TURN_2, 55_749, 55_671, 78, 30),
-        item(
-            TURN_2,
-            Kind::ToolOutput("call_8"),
-            32_609,
-        ),
+        item(TURN_2, Kind::ToolOutput("call_8"), 32_609),
         window(TURN_2),
         item(TURN_2, Kind::Reasoning, 1_593),
         item(TURN_2, Kind::ToolCall("call_9"), 525),
         usage_at(TURN_2, 62_518, 62_417, 101, 33),
-        item(
-            TURN_2,
-            Kind::ToolOutput("call_9"),
-            37_513,
-        ),
+        item(TURN_2, Kind::ToolOutput("call_9"), 37_513),
         window(TURN_2),
         item(TURN_2, Kind::Reasoning, 1_549),
         item(TURN_2, Kind::ToolCall("call_10"), 528),
         usage_at(TURN_2, 70_306, 70_221, 85, 36),
-        item(
-            TURN_2,
-            Kind::ToolOutput("call_10"),
-            37_817,
-        ),
+        item(TURN_2, Kind::ToolOutput("call_10"), 37_817),
         window(TURN_2),
         item(TURN_2, Kind::Reasoning, 1_549),
         item(TURN_2, Kind::ToolCall("call_11"), 529),
         usage_at(TURN_2, 77_209, 77_118, 91, 39),
-        item(
-            TURN_2,
-            Kind::ToolOutput("call_11"),
-            37_067,
-        ),
+        item(TURN_2, Kind::ToolOutput("call_11"), 37_067),
         window(TURN_2),
         item(TURN_2, Kind::Reasoning, 1_633),
         item(TURN_2, Kind::AgentMessage, 908),
@@ -401,16 +435,19 @@ fn the_big_read_is_priced_by_the_anchors_around_it() {
 }
 
 #[test]
-fn the_negative_turn_boundary_leaves_the_first_span_on_the_proxy() {
+fn the_negative_turn_boundary_leaves_the_first_span_on_its_estimate() {
     let state = fold(&live_trace_records()).state().clone();
 
     // Turn 1 closes at 33,318 and turn 2 opens at input 33,113: the context shrank by 205. The
     // same-turn rule never sees that, because turn 2's first anchor has no previous same-turn
-    // anchor, so its one input-kind item keeps the byte proxy.
+    // anchor, so its one input-kind item keeps its estimate.
     let opening_message = &state.snapshot.items[15];
     assert_eq!(395, opening_message.bytes);
     assert_eq!(Category::UserMessage, opening_message.category);
-    assert_eq!(TokenCost::Estimated(byte_proxy(395)), opening_message.cost);
+    assert_eq!(
+        TokenCost::Estimated(text_tokens(opening_message.parts[0].bytes)),
+        opening_message.cost
+    );
 }
 
 #[test]
@@ -442,6 +479,76 @@ fn both_completed_turns_carry_their_measured_span() {
     );
 }
 
+/// The opening fragments are contextual instructions, not things the user typed. Their kinds say so,
+/// including one kind name upstream has already retired.
+#[test]
+fn the_opening_fragments_are_instructions_and_nothing_is_ambiguous() {
+    let state = fold(&live_trace_records()).state().clone();
+    let items = &state.snapshot.items;
+    let of_seqs = |seqs: &[u64]| {
+        seqs.iter()
+            .map(|seq| items[(*seq - 1) as usize].cost)
+            .reduce(TokenCost::combine)
+            .expect("non-empty selection")
+    };
+    let of_category = |category: Category| {
+        items
+            .iter()
+            .filter(|item| item.category == category)
+            .map(|item| item.cost)
+            .reduce(TokenCost::combine)
+            .expect("non-empty category")
+    };
+
+    assert_eq!(0, state.classification_warning_count);
+    assert_eq!(
+        vec![
+            (Category::UserMessage, of_seqs(&[5, 16])),
+            (Category::AgentMessage, of_category(Category::AgentMessage)),
+            (Category::Reasoning, of_category(Category::Reasoning)),
+            (Category::ToolCall, of_category(Category::ToolCall)),
+            (Category::ToolOutput, of_category(Category::ToolOutput)),
+            (Category::Instructions, of_seqs(&[1, 2, 3, 4])),
+        ],
+        state.snapshot.by_category
+    );
+}
+
+#[test]
+fn a_merged_fragment_message_keeps_one_part_per_content_entry() {
+    let state = fold(&live_trace_records()).state().clone();
+    let items = &state.snapshot.items;
+
+    let part_kinds = |index: usize| {
+        items[index]
+            .parts
+            .iter()
+            .map(|part| part.kind.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(FIRST_TURN_INSTRUCTION_KINDS.to_vec(), part_kinds(0));
+    assert_eq!(
+        vec!["agents_md.instructions", "environments.environment_context"],
+        part_kinds(3)
+    );
+
+    // The parts are the whole payload bar the message envelope, and the padding split evenly.
+    for index in [0, 3] {
+        let part_bytes: Vec<usize> = items[index].parts.iter().map(|part| part.bytes).collect();
+        let total: usize = part_bytes.iter().sum();
+        let spread = part_bytes.iter().max().unwrap_or(&0) - part_bytes.iter().min().unwrap_or(&0);
+        assert!(
+            total < items[index].bytes && total + 500 > items[index].bytes,
+            "item {index} parts total {total} against {} bytes",
+            items[index].bytes
+        );
+        assert!(
+            spread <= 1,
+            "item {index} padding split unevenly: {part_bytes:?}"
+        );
+    }
+}
+
 /// Findings §10.1: the interrupted turn, with the capture's own sizes and anchor.
 fn interrupted_records() -> Vec<Record> {
     vec![
@@ -468,8 +575,8 @@ fn an_interrupted_turn_strands_its_trailing_items_permanently() {
     assert_eq!(
         vec![
             TokenCost::Exact(130),
-            TokenCost::Estimated(byte_proxy(291)),
-            TokenCost::Estimated(byte_proxy(526)),
+            estimated(&sized(Kind::ToolOutput("call_spike_d"), 291)),
+            estimated(&sized(Kind::AgentMessage, 526)),
             TokenCost::Exact(300),
         ],
         costs(&state)
@@ -511,6 +618,7 @@ fn the_derived_views_are_ordered_by_seq_not_by_iteration() {
             Category::Reasoning,
             Category::ToolCall,
             Category::ToolOutput,
+            Category::Instructions,
         ],
         state
             .snapshot

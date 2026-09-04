@@ -12,6 +12,7 @@ use codex_app_server_protocol::TurnStartedNotification;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ResponseItem;
 use pretty_assertions::assert_eq;
 
 const THREAD: &str = "th_1";

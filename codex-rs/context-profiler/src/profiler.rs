@@ -6,15 +6,19 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
-use codex_protocol::models::ResponseItem;
-
+use crate::classify::classify;
+use crate::estimate::item_tokens;
+use crate::estimate::serialized_size;
 use crate::event::InvalidationReason;
 use crate::event::ProfilerEvent;
 use crate::item::Category;
 use crate::item::GroupKey;
 use crate::item::ItemGroup;
 use crate::item::ItemSummary;
+use crate::item::PricingKind;
 use crate::item::TokenCost;
+use crate::kind::call_id;
+use crate::kind::item_kind;
 use crate::snapshot::ProfilerState;
 use crate::snapshot::TurnDelta;
 use crate::usage::UsageSnapshot;
@@ -73,20 +77,32 @@ impl ContextProfiler {
                 let turn_index = self.turn_index(turn_id);
                 self.items_seen += 1;
                 let seq = self.items_seen;
-                let bytes = serde_json::to_vec(item).map(|json| json.len()).unwrap_or(0);
+                let size = serialized_size(item);
+                if size.is_none() {
+                    self.state.unsizable_item_count += 1;
+                }
                 let group = match call_id(item) {
                     Some(call_id) => GroupKey::ToolCall(call_id),
                     None => GroupKey::Ungrouped(seq),
                 };
+                let classification = classify(item);
+                if classification.warned() {
+                    self.state.classification_warning_count += 1;
+                }
+                let estimate =
+                    size.map_or(0, |bytes| item_tokens(item, &classification.parts, bytes));
                 self.state.snapshot.items.push(ItemSummary {
                     seq,
                     turn_index,
-                    category: category(item),
-                    bytes,
-                    cost: TokenCost::Estimated(byte_proxy(bytes)),
+                    category: classification.category,
+                    pricing: classification.pricing,
+                    bytes: size.unwrap_or(0),
+                    cost: TokenCost::Estimated(estimate),
                     label: item_kind(item).to_string(),
                     group,
                     item_id: item.id().map(ToString::to_string),
+                    parts: classification.parts,
+                    warnings: classification.warnings,
                 });
                 self.rebuild_aggregates();
             }
@@ -161,41 +177,85 @@ impl ContextProfiler {
     ///
     /// Output-kind items are priced at every anchor, since `output_tokens` is an absolute. Input-kind
     /// items need a pair of same-turn anchors, because only a delta reveals what the next request
-    /// serialised. Items left over when a turn closes stay on the byte proxy forever.
+    /// serialized. Items left over when a turn closes keep their estimates forever.
+    ///
+    /// `reasoning_output_tokens` is a documented subset of `output_tokens` (the API's
+    /// `output_tokens_details.reasoning_tokens`), so the output pass splits in two: reasoning items
+    /// share the subset and the rest share what is left. Reasoning is priced per byte nothing like
+    /// prose, so mixing the two into one apportionment is what the split exists to avoid.
+    ///
+    /// One `Ambiguous` item poisons its whole span: neither measured total can be divided when part
+    /// of the span may have landed in the other one, so the span keeps its estimates. The anchor is
+    /// still recorded and still closes the span, so the next span prices normally.
+    ///
+    /// Reasoning tokens split off from the output pool only when the anchor reports them; a zero
+    /// is what an unreported `output_tokens_details` reads as, never evidence of free reasoning.
     fn attribute_span(&mut self, usage: &UsageSnapshot) {
         let Some(turn) = self.open_turn.as_ref() else {
             return;
         };
         let span = turn.last_anchor_seq.map_or(turn.first_seq, |seq| seq + 1)..=self.items_seen;
         let previous_total = turn.last_anchor;
-        self.reprice(&span, ItemKind::Output, usage.output_tokens);
+        if self.span_is_ambiguous(&span) {
+            return;
+        }
+        let output = self.positions(&span, PricingKind::Output);
+        if usage.reasoning_output_tokens > 0 {
+            let (reasoning, generated): (Vec<usize>, Vec<usize>) =
+                output.into_iter().partition(|&position| {
+                    self.state.snapshot.items[position].category == Category::Reasoning
+                });
+            self.reprice(&reasoning, usage.reasoning_output_tokens);
+            self.reprice(
+                &generated,
+                (usage.output_tokens - usage.reasoning_output_tokens).max(0),
+            );
+        } else {
+            self.reprice(&output, usage.output_tokens);
+        }
         if let Some(previous_total) = previous_total {
             let delta = usage.input_tokens - previous_total;
             if delta >= 0 {
-                self.reprice(&span, ItemKind::Input, delta);
+                let input = self.positions(&span, PricingKind::Input);
+                self.reprice(&input, delta);
             }
         }
         self.rebuild_aggregates();
     }
 
-    /// A whole total on a lone item is exact; a share of one is not.
-    fn reprice(&mut self, span: &RangeInclusive<u64>, kind: ItemKind, total: i64) {
-        let positions: Vec<usize> = self
-            .state
+    fn span_is_ambiguous(&self, span: &RangeInclusive<u64>) -> bool {
+        self.state
+            .snapshot
+            .items
+            .iter()
+            .any(|item| span.contains(&item.seq) && item.pricing == PricingKind::Ambiguous)
+    }
+
+    fn positions(&self, span: &RangeInclusive<u64>, kind: PricingKind) -> Vec<usize> {
+        self.state
             .snapshot
             .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| span.contains(&item.seq) && pricing_kind(item.category) == kind)
+            .filter(|(_, item)| span.contains(&item.seq) && item.pricing == kind)
             .map(|(position, _)| position)
-            .collect();
-        match positions.as_slice() {
+            .collect()
+    }
+
+    /// A whole total on a lone item is exact; a share of one is not.
+    ///
+    /// Shares are weighted by each item's current cost, which is still its initial estimate: an item
+    /// is repriced exactly once, when its span closes, and the passes above weight disjoint sets.
+    /// Bytes would be the wrong weight, since an image contributes tens of kilobytes of base64 for
+    /// roughly the tokens of a paragraph.
+    fn reprice(&mut self, positions: &[usize], total: i64) {
+        match positions {
             [] => {}
             [only] => self.state.snapshot.items[*only].cost = TokenCost::Exact(total),
             _ => {
-                let weights: Vec<usize> = positions
+                let weights: Vec<i64> = positions
                     .iter()
-                    .map(|&position| self.state.snapshot.items[position].bytes)
+                    .map(|&position| self.state.snapshot.items[position].cost.tokens())
                     .collect();
                 for (&position, share) in positions.iter().zip(apportion(total, &weights)) {
                     self.state.snapshot.items[position].cost = TokenCost::Estimated(share);
@@ -264,33 +324,9 @@ impl ContextProfiler {
                 .or_insert(item.cost);
         }
         let mut by_category: Vec<(Category, TokenCost)> = totals.into_iter().collect();
-        by_category.sort_by_key(|(category, _)| category.ordinal());
+        by_category.sort_by_key(|(category, _)| *category);
         self.state.snapshot.groups = groups;
         self.state.snapshot.by_category = by_category;
-    }
-}
-
-/// Crude placeholder cost, replaced by the M2d estimator.
-fn byte_proxy(bytes: usize) -> i64 {
-    (bytes / 4) as i64
-}
-
-/// Which measured total prices an item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ItemKind {
-    /// Serialised into the next request, so an anchor delta prices it.
-    Input,
-    /// One response's own output, so that response's `output_tokens` prices it.
-    Output,
-    /// Neither; stays on the byte proxy.
-    Unpriced,
-}
-
-fn pricing_kind(category: Category) -> ItemKind {
-    match category {
-        Category::UserMessage | Category::ToolOutput => ItemKind::Input,
-        Category::AgentMessage | Category::Reasoning | Category::ToolCall => ItemKind::Output,
-        Category::Instructions | Category::Compaction | Category::Other => ItemKind::Unpriced,
     }
 }
 
@@ -299,7 +335,7 @@ fn pricing_kind(category: Category) -> ItemKind {
 /// Each share is the running floor of the cumulative weight fraction minus what is already handed
 /// out, so the last cumulative floor is `total` itself and the rounding remainder lands on later
 /// entries rather than being lost. Weightless items split evenly, remainder to the earliest.
-fn apportion(total: i64, weights: &[usize]) -> Vec<i64> {
+fn apportion(total: i64, weights: &[i64]) -> Vec<i64> {
     if weights.is_empty() {
         return Vec::new();
     }
@@ -308,7 +344,7 @@ fn apportion(total: i64, weights: &[usize]) -> Vec<i64> {
     }
     let count = weights.len() as i128;
     let total = i128::from(total);
-    let total_weight: i128 = weights.iter().map(|&weight| weight as i128).sum();
+    let total_weight: i128 = weights.iter().copied().map(i128::from).sum();
     if total_weight == 0 {
         let base = total / count;
         let remainder = total % count;
@@ -320,83 +356,12 @@ fn apportion(total: i64, weights: &[usize]) -> Vec<i64> {
     let mut cumulative_weight: i128 = 0;
     let mut assigned: i128 = 0;
     for &weight in weights {
-        cumulative_weight += weight as i128;
+        cumulative_weight += i128::from(weight);
         let cumulative = total * cumulative_weight / total_weight;
         shares.push((cumulative - assigned) as i64);
         assigned = cumulative;
     }
     shares
-}
-
-/// Exhaustive so a new upstream `ResponseItem` variant fails the build.
-fn category(item: &ResponseItem) -> Category {
-    match item {
-        ResponseItem::Reasoning { .. } => Category::Reasoning,
-        ResponseItem::FunctionCall { .. }
-        | ResponseItem::CustomToolCall { .. }
-        | ResponseItem::LocalShellCall { .. }
-        | ResponseItem::ToolSearchCall { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. } => Category::ToolCall,
-        ResponseItem::FunctionCallOutput { .. }
-        | ResponseItem::CustomToolCallOutput { .. }
-        | ResponseItem::ToolSearchOutput { .. } => Category::ToolOutput,
-        ResponseItem::Message { role, .. } if role == "user" => Category::UserMessage,
-        ResponseItem::Message { .. } | ResponseItem::AgentMessage { .. } => Category::AgentMessage,
-        ResponseItem::Compaction { .. }
-        | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::ContextCompaction { .. } => Category::Compaction,
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::ConfigurationUpdate { .. }
-        | ResponseItem::Other => Category::Other,
-    }
-}
-
-fn item_kind(item: &ResponseItem) -> &'static str {
-    match item {
-        ResponseItem::AdditionalTools { .. } => "AdditionalTools",
-        ResponseItem::Message { .. } => "Message",
-        ResponseItem::AgentMessage { .. } => "AgentMessage",
-        ResponseItem::Reasoning { .. } => "Reasoning",
-        ResponseItem::LocalShellCall { .. } => "LocalShellCall",
-        ResponseItem::FunctionCall { .. } => "FunctionCall",
-        ResponseItem::ToolSearchCall { .. } => "ToolSearchCall",
-        ResponseItem::FunctionCallOutput { .. } => "FunctionCallOutput",
-        ResponseItem::CustomToolCall { .. } => "CustomToolCall",
-        ResponseItem::CustomToolCallOutput { .. } => "CustomToolCallOutput",
-        ResponseItem::ToolSearchOutput { .. } => "ToolSearchOutput",
-        ResponseItem::WebSearchCall { .. } => "WebSearchCall",
-        ResponseItem::ImageGenerationCall { .. } => "ImageGenerationCall",
-        ResponseItem::Compaction { .. } => "Compaction",
-        ResponseItem::CompactionTrigger { .. } => "CompactionTrigger",
-        ResponseItem::ConfigurationUpdate { .. } => "ConfigurationUpdate",
-        ResponseItem::ContextCompaction { .. } => "ContextCompaction",
-        ResponseItem::Other => "Other",
-    }
-}
-
-/// Mirrors the TUI adapter so the two agree on which items pair into one group.
-fn call_id(item: &ResponseItem) -> Option<String> {
-    match item {
-        ResponseItem::LocalShellCall { call_id, .. }
-        | ResponseItem::ToolSearchCall { call_id, .. }
-        | ResponseItem::FunctionCallOutput { call_id, .. }
-        | ResponseItem::ToolSearchOutput { call_id, .. } => call_id.clone(),
-        ResponseItem::FunctionCall { call_id, .. }
-        | ResponseItem::CustomToolCall { call_id, .. }
-        | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.clone()),
-        ResponseItem::AdditionalTools { .. }
-        | ResponseItem::Message { .. }
-        | ResponseItem::AgentMessage { .. }
-        | ResponseItem::Reasoning { .. }
-        | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. }
-        | ResponseItem::Compaction { .. }
-        | ResponseItem::CompactionTrigger { .. }
-        | ResponseItem::ConfigurationUpdate { .. }
-        | ResponseItem::ContextCompaction { .. }
-        | ResponseItem::Other => None,
-    }
 }
 
 #[cfg(test)]

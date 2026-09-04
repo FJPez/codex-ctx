@@ -1,14 +1,28 @@
 use super::*;
+use crate::classify::classify;
 use crate::event::InvalidationReason;
 use crate::snapshot::ContextSnapshot;
 use crate::usage::UsageSnapshot;
+use codex_protocol::models::ConfigurationReasoning;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 
 const TURN: &str = "tu_1";
 const OTHER_TURN: &str = "tu_2";
+
+/// Core stamps one `ContentItemKind` per content entry; every message here has exactly one entry.
+fn kinds(kind: &str) -> Option<InternalChatMessageMetadataPassthrough> {
+    Some(InternalChatMessageMetadataPassthrough {
+        content_item_kinds: Some(vec![ContentItemKind(kind.to_string())]),
+        ..Default::default()
+    })
+}
 
 fn message_item(text: &str) -> ResponseItem {
     ResponseItem::Message {
@@ -18,7 +32,7 @@ fn message_item(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        internal_chat_message_metadata_passthrough: None,
+        internal_chat_message_metadata_passthrough: kinds("unknown"),
     }
 }
 
@@ -52,6 +66,20 @@ fn sized_tool_output(call_id: &str, text_len: usize) -> ResponseItem {
     }
 }
 
+/// A user message whose single content entry is an inline image data URL.
+fn image_message(payload_len: usize) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image_url: format!("data:image/png;base64,{}", "A".repeat(payload_len)),
+            detail: None,
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: kinds("user.image"),
+    }
+}
+
 fn user_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
         id: None,
@@ -60,7 +88,40 @@ fn user_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
+        internal_chat_message_metadata_passthrough: kinds("user.text"),
+    }
+}
+
+/// A contextual fragment core injects as a user-role message, tagged with its own kind.
+fn instruction_message(kind: &str, text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: kinds(kind),
+    }
+}
+
+fn unknown_role_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "tool".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
         internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn configuration_update() -> ResponseItem {
+    ResponseItem::ConfigurationUpdate {
+        reasoning: ConfigurationReasoning {
+            effort: ReasoningEffort::Medium,
+        },
     }
 }
 
@@ -110,20 +171,31 @@ fn item_bytes(item: &ResponseItem) -> usize {
     serde_json::to_vec(item).expect("serializable item").len()
 }
 
+/// The initial estimate an item carries until an anchor prices it.
 fn item_cost(item: &ResponseItem) -> TokenCost {
-    TokenCost::Estimated(byte_proxy(item_bytes(item)))
+    let classification = classify(item);
+    TokenCost::Estimated(item_tokens(item, &classification.parts, item_bytes(item)))
+}
+
+/// The apportioning weights are the items' current estimates, never their bytes.
+fn weights(items: &[&ResponseItem]) -> Vec<i64> {
+    items.iter().map(|item| item_cost(item).tokens()).collect()
 }
 
 fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> ItemSummary {
+    let classification = classify(item);
     ItemSummary {
         seq,
         turn_index,
-        category: category(item),
+        category: classification.category,
+        pricing: classification.pricing,
         bytes: item_bytes(item),
         cost: item_cost(item),
         label: item_kind(item).to_string(),
         group,
         item_id: None,
+        parts: classification.parts,
+        warnings: classification.warnings,
     }
 }
 
@@ -146,25 +218,28 @@ fn single_turn_folds_items_anchor_and_turn_delta() {
     let mut profiler = ContextProfiler::new();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&user, &reasoning, &answer]);
+    let usage = UsageSnapshot {
+        reasoning_output_tokens: 30,
+        ..anchor(1_200, 1_200, 40, 3)
+    };
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
-        usage: anchor(1_200, 1_200, 40, 3),
+        usage: usage.clone(),
     });
     profiler.observe(ProfilerEvent::TurnEnded {
         turn_id: TURN,
         completed: true,
     });
 
-    // The two output-kind items share the anchor's 40 output tokens; the user message has no
-    // earlier same-turn anchor to price it, so it keeps the byte proxy.
+    // The reasoning item takes the measured reasoning subset and the message takes the rest; the
+    // user message has no earlier same-turn anchor to price it, so it keeps its estimate.
     let mut items = vec![
         summary(1, 0, &user, GroupKey::Ungrouped(1)),
         summary(2, 0, &reasoning, GroupKey::Ungrouped(2)),
         summary(3, 0, &answer, GroupKey::Ungrouped(3)),
     ];
-    let shares = apportion(40, &[items[1].bytes, items[2].bytes]);
-    items[1].cost = TokenCost::Estimated(shares[0]);
-    items[2].cost = TokenCost::Estimated(shares[1]);
+    items[1].cost = TokenCost::Exact(30);
+    items[2].cost = TokenCost::Exact(10);
     let estimated_added = items.iter().map(|item| item.cost.tokens()).sum();
     let expected = ProfilerState {
         snapshot: ContextSnapshot {
@@ -190,8 +265,9 @@ fn single_turn_folds_items_anchor_and_turn_delta() {
             items,
         },
         invalidated: None,
-        unrecognized_fragment_count: 0,
-        anchors: vec![anchor(1_200, 1_200, 40, 3)],
+        classification_warning_count: 0,
+        unsizable_item_count: 0,
+        anchors: vec![usage],
     };
     assert_eq!(&expected, profiler.state());
 }
@@ -363,10 +439,7 @@ fn forged_usage_seq_invalidates_without_anchoring() {
         state.invalidated
     );
     assert_eq!(Vec::<UsageSnapshot>::new(), state.anchors);
-    assert_eq!(
-        TokenCost::Estimated(byte_proxy(item_bytes(&item))),
-        state.snapshot.items[0].cost
-    );
+    assert_eq!(item_cost(&item), state.snapshot.items[0].cost);
 }
 
 /// A response without usage is a boundary: nothing across it is priced, but the next response is.
@@ -407,7 +480,10 @@ fn missing_usage_isolates_the_next_response() {
     });
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
-        usage: anchor(1_600, 1_500, 100, 4),
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 100,
+            ..anchor(1_600, 1_500, 100, 4)
+        },
     });
     profiler.observe(ProfilerEvent::TurnEnded {
         turn_id: TURN,
@@ -418,9 +494,9 @@ fn missing_usage_isolates_the_next_response() {
     let costs: Vec<TokenCost> = state.snapshot.items.iter().map(|item| item.cost).collect();
     assert_eq!(
         vec![
-            TokenCost::Estimated(byte_proxy(item_bytes(&reasoning_a))),
-            TokenCost::Estimated(byte_proxy(item_bytes(&call_a))),
-            TokenCost::Estimated(byte_proxy(item_bytes(&output_a))),
+            item_cost(&reasoning_a),
+            item_cost(&call_a),
+            item_cost(&output_a),
             TokenCost::Exact(100),
         ],
         costs
@@ -518,34 +594,36 @@ fn capture_shape_prices_the_tool_output_from_the_anchor_delta() {
     observe_items(&mut profiler, TURN, &first_span);
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
-        usage: anchor(25_422, 25_230, 192, 8),
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 100,
+            ..anchor(25_422, 25_230, 192, 8)
+        },
     });
     observe_items(&mut profiler, TURN, &[&output, &second_reasoning]);
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
-        usage: anchor(29_230, 29_137, 93, 10),
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 93,
+            ..anchor(29_230, 29_137, 93, 10)
+        },
     });
     profiler.observe(ProfilerEvent::TurnEnded {
         turn_id: TURN,
         completed: true,
     });
 
-    let shares = apportion(
-        192,
-        &[
-            item_bytes(&reasoning),
-            item_bytes(&answer),
-            item_bytes(&call),
-        ],
-    );
+    // 100 of the 192 output tokens are measured reasoning; the message and the call share the 92
+    // that are left.
+    let shares = apportion(92, &weights(&[&answer, &call]));
     let expected: Vec<TokenCost> = prompts
         .iter()
         .map(item_cost)
+        .chain([TokenCost::Exact(100)])
         .chain(shares.iter().copied().map(TokenCost::Estimated))
         .chain([TokenCost::Exact(3_715), TokenCost::Exact(93)])
         .collect();
     assert_eq!(expected, costs(&profiler));
-    assert_eq!(192, shares.iter().sum::<i64>());
+    assert_eq!(92, shares.iter().sum::<i64>());
 }
 
 #[test]
@@ -558,7 +636,10 @@ fn first_anchor_prices_output_items_without_a_previous_anchor() {
     observe_items(&mut profiler, TURN, &[&reasoning]);
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
-        usage: anchor(1_000, 1_000, 77, 1),
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 77,
+            ..anchor(1_000, 1_000, 77, 1)
+        },
     });
     observe_items(&mut profiler, TURN, &[&call]);
     profiler.observe(ProfilerEvent::Usage {
@@ -573,7 +654,7 @@ fn first_anchor_prices_output_items_without_a_previous_anchor() {
 }
 
 #[test]
-fn two_input_items_split_the_delta_by_bytes() {
+fn two_input_items_split_the_delta_by_estimate() {
     let envelope = item_bytes(&sized_tool_output("call_0", 0));
     let small = sized_tool_output("call_1", 1);
     let big = sized_tool_output("call_2", 2 * envelope + 3);
@@ -590,11 +671,17 @@ fn two_input_items_split_the_delta_by_bytes() {
         usage: usage(1_100, 2),
     });
 
+    // Both items are plain text, so the estimator carries the 3:1 byte ratio into the weights.
     assert_eq!(3 * item_bytes(&small), item_bytes(&big));
+    let shares = apportion(100, &weights(&[&big, &small]));
     assert_eq!(
-        vec![TokenCost::Estimated(75), TokenCost::Estimated(25)],
+        vec![
+            TokenCost::Estimated(shares[0]),
+            TokenCost::Estimated(shares[1]),
+        ],
         costs(&profiler)
     );
+    assert_eq!(vec![75, 25], shares);
 }
 
 #[test]
@@ -633,7 +720,7 @@ fn weightless_items_split_evenly_with_the_remainder_first() {
 }
 
 #[test]
-fn a_negative_delta_leaves_the_byte_proxy_in_place() {
+fn a_negative_delta_leaves_the_estimate_in_place() {
     let output = custom_tool_call_output("call_1");
 
     let mut profiler = ContextProfiler::new();
@@ -701,31 +788,33 @@ fn repricing_rebuilds_the_aggregates_whole() {
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
     observe_items(&mut profiler, TURN, &[&reasoning, &answer]);
 
-    let proxied = vec![
+    let estimated = vec![
         summary(1, 0, &reasoning, GroupKey::Ungrouped(1)),
         summary(2, 0, &answer, GroupKey::Ungrouped(2)),
     ];
     assert_eq!(
         vec![
-            (Category::AgentMessage, proxied[1].cost),
-            (Category::Reasoning, proxied[0].cost),
+            (Category::AgentMessage, estimated[1].cost),
+            (Category::Reasoning, estimated[0].cost),
         ],
         profiler.state().snapshot.by_category
     );
     assert_eq!(
-        proxied.iter().map(group_of).collect::<Vec<_>>(),
+        estimated.iter().map(group_of).collect::<Vec<_>>(),
         profiler.state().snapshot.groups
     );
 
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
-        usage: anchor(900, 900, 100, 2),
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 40,
+            ..anchor(900, 900, 100, 2)
+        },
     });
 
-    let shares = apportion(100, &[proxied[0].bytes, proxied[1].bytes]);
-    let mut repriced = proxied;
-    repriced[0].cost = TokenCost::Estimated(shares[0]);
-    repriced[1].cost = TokenCost::Estimated(shares[1]);
+    let mut repriced = estimated;
+    repriced[0].cost = TokenCost::Exact(40);
+    repriced[1].cost = TokenCost::Exact(60);
     assert_eq!(
         vec![
             (Category::AgentMessage, repriced[1].cost),
@@ -744,7 +833,7 @@ fn repricing_rebuilds_the_aggregates_whole() {
 fn a_group_is_exact_only_when_every_member_is() {
     let exact_call = custom_tool_call("call_1");
     let exact_output = custom_tool_call_output("call_1");
-    let shared_reasoning = reasoning_item();
+    let shared_message = message_item("thinking");
     let shared_call = custom_tool_call("call_2");
     let shared_output = custom_tool_call_output("call_2");
 
@@ -758,7 +847,7 @@ fn a_group_is_exact_only_when_every_member_is() {
     observe_items(
         &mut profiler,
         TURN,
-        &[&exact_output, &shared_reasoning, &shared_call],
+        &[&exact_output, &shared_message, &shared_call],
     );
     profiler.observe(ProfilerEvent::Usage {
         turn_id: TURN,
@@ -770,11 +859,241 @@ fn a_group_is_exact_only_when_every_member_is() {
         usage: anchor(1_400, 1_400, 0, 5),
     });
 
-    let shares = apportion(
-        60,
-        &[item_bytes(&shared_reasoning), item_bytes(&shared_call)],
-    );
+    let shares = apportion(60, &weights(&[&shared_message, &shared_call]));
     let groups = &profiler.state().snapshot.groups;
     assert_eq!(TokenCost::Exact(250), groups[0].cost);
     assert_eq!(TokenCost::Estimated(shares[1] + 140), groups[2].cost);
+}
+
+/// Injected instruction fragments are user-role input, so an anchor delta prices them; before the
+/// pricing kind was split off the display category they were left unpriced forever.
+#[test]
+fn instructions_share_the_input_delta_with_tool_output() {
+    let reminder = instruction_message("current_time.reminder", "it is late");
+    let output = custom_tool_call_output("call_1");
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_000, 0),
+    });
+    observe_items(&mut profiler, TURN, &[&reminder, &output]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_100, 2),
+    });
+
+    assert_eq!(
+        Category::Instructions,
+        profiler.state().snapshot.items[0].category
+    );
+    let shares = apportion(100, &weights(&[&reminder, &output]));
+    assert_eq!(
+        vec![
+            TokenCost::Estimated(shares[0]),
+            TokenCost::Estimated(shares[1]),
+        ],
+        costs(&profiler)
+    );
+    assert_eq!(100, shares.iter().sum::<i64>());
+}
+
+/// A `ConfigurationUpdate` could land in either measured total, so its span is left alone - but the
+/// anchor still closes the span, and the next one prices normally.
+#[test]
+fn an_ambiguous_item_leaves_its_span_estimated_and_the_next_span_recovers() {
+    let update = configuration_update();
+    let poisoned = sized_tool_output("call_1", 4);
+    let recovered = custom_tool_call_output("call_2");
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_000, 0),
+    });
+    observe_items(&mut profiler, TURN, &[&update, &poisoned]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_100, 2),
+    });
+    observe_items(&mut profiler, TURN, &[&recovered]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_400, 3),
+    });
+
+    let state = profiler.state();
+    assert_eq!(
+        vec![
+            item_cost(&update),
+            item_cost(&poisoned),
+            TokenCost::Exact(300),
+        ],
+        costs(&profiler)
+    );
+    assert_eq!(0, state.classification_warning_count);
+    assert_eq!(3, state.anchors.len());
+}
+
+/// The serde fallback item is the one shape whose arrival is itself the finding.
+#[test]
+fn an_unknown_item_type_is_counted_once() {
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(&mut profiler, TURN, &[&ResponseItem::Other]);
+
+    let state = profiler.state();
+    assert_eq!(1, state.classification_warning_count);
+    assert_eq!(Category::Other, state.snapshot.items[0].category);
+    assert_eq!(PricingKind::Ambiguous, state.snapshot.items[0].pricing);
+    assert_eq!(None, state.invalidated);
+}
+
+/// An unknown role is both a display warning and a pricing ambiguity, and neither invalidates.
+#[test]
+fn an_unknown_role_message_poisons_only_its_own_span() {
+    let odd = unknown_role_message("mystery");
+    let reasoning = reasoning_item();
+    let later = reasoning_item();
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: anchor(1_000, 1_000, 0, 0),
+    });
+    observe_items(&mut profiler, TURN, &[&odd, &reasoning]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: anchor(1_100, 1_050, 50, 2),
+    });
+    observe_items(&mut profiler, TURN, &[&later]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 60,
+            ..anchor(1_160, 1_100, 60, 3)
+        },
+    });
+
+    let state = profiler.state();
+    assert_eq!(
+        vec![item_cost(&odd), item_cost(&reasoning), TokenCost::Exact(60),],
+        costs(&profiler)
+    );
+    assert_eq!(1, state.classification_warning_count);
+    assert_eq!(None, state.invalidated);
+}
+
+/// `reasoning_output_tokens` is a subset of `output_tokens`, so the two kinds of output are priced
+/// from their own measured totals rather than apportioned against each other.
+#[test]
+fn reasoning_and_generated_output_are_priced_from_separate_measured_totals() {
+    let reasoning = reasoning_item();
+    let answer = message_item("done");
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(&mut profiler, TURN, &[&reasoning, &answer]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 100,
+            ..anchor(2_000, 1_850, 150, 2)
+        },
+    });
+
+    assert_eq!(
+        vec![TokenCost::Exact(100), TokenCost::Exact(50)],
+        costs(&profiler)
+    );
+}
+
+/// Reasoning tokens with no reasoning item in the span belong to nothing we observed there, so the
+/// generated items take only the remainder.
+#[test]
+fn reasoning_tokens_without_a_reasoning_item_are_not_given_to_the_generated_items() {
+    let answer = message_item("done");
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(&mut profiler, TURN, &[&answer]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 40,
+            ..anchor(1_000, 1_000, 100, 1)
+        },
+    });
+
+    assert_eq!(vec![TokenCost::Exact(60)], costs(&profiler));
+}
+
+#[test]
+fn two_reasoning_items_share_the_measured_reasoning_subset() {
+    let first = reasoning_item();
+    let second = reasoning_item();
+    let answer = message_item("done");
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(&mut profiler, TURN, &[&first, &second, &answer]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: UsageSnapshot {
+            reasoning_output_tokens: 100,
+            ..anchor(2_000, 1_850, 150, 3)
+        },
+    });
+
+    let shares = apportion(100, &weights(&[&first, &second]));
+    assert_eq!(
+        vec![
+            TokenCost::Estimated(shares[0]),
+            TokenCost::Estimated(shares[1]),
+            TokenCost::Exact(50),
+        ],
+        costs(&profiler)
+    );
+}
+
+/// An inline image is tens of kilobytes of base64 that cost about a paragraph. Weighting by bytes
+/// would hand it nearly the whole delta; weighting by the estimate hands it its flat image cost.
+#[test]
+fn an_image_takes_an_estimate_weighted_share_not_a_byte_weighted_one() {
+    let output = sized_tool_output("call_1", 20_000);
+    let image = image_message(40_000);
+
+    let mut profiler = ContextProfiler::new();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(1_000, 0),
+    });
+    observe_items(&mut profiler, TURN, &[&output, &image]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(4_000, 2),
+    });
+
+    let shares = apportion(3_000, &weights(&[&output, &image]));
+    assert_eq!(
+        vec![
+            TokenCost::Estimated(shares[0]),
+            TokenCost::Estimated(shares[1]),
+        ],
+        costs(&profiler)
+    );
+    let by_bytes = apportion(
+        3_000,
+        &[item_bytes(&output) as i64, item_bytes(&image) as i64],
+    );
+    assert!(
+        shares[1] * 2 < by_bytes[1] && shares[1] * 2 < 3_000,
+        "image took {} of 3,000, against {} by bytes",
+        shares[1],
+        by_bytes[1]
+    );
 }
