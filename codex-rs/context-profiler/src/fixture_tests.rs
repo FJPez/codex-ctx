@@ -215,8 +215,8 @@ fn events(records: &[Record]) -> Vec<ProfilerEvent<'_>> {
         .collect()
 }
 
-fn fold(records: &[Record]) -> ContextProfiler {
-    let mut profiler = ContextProfiler::new();
+fn fold(records: &[Record], start: ObservationStart) -> ContextProfiler {
+    let mut profiler = ContextProfiler::new(start);
     for event in events(records) {
         profiler.observe(event);
     }
@@ -272,7 +272,9 @@ fn ladder_records() -> Vec<Record> {
 
 #[test]
 fn the_measured_ladder_prices_every_tool_output_to_the_token() {
-    let state = fold(&ladder_records()).state().clone();
+    let state = fold(&ladder_records(), ObservationStart::MidStream)
+        .state()
+        .clone();
 
     // Each span holds one tool output and one reasoning item, so both take a whole measured total.
     // The captures never transcribed `output_tokens_details.reasoning_tokens`, so the anchors
@@ -404,17 +406,24 @@ fn live_trace_records() -> Vec<Record> {
     ]
 }
 
+/// The fixture's items carry synthetic padding rather than the capture's real text, so the baseline
+/// residual is not the measured 11,700.
 #[test]
 fn the_live_trace_folds_into_the_measured_totals() {
-    let state = fold(&live_trace_records()).state().clone();
+    let state = fold(&live_trace_records(), ObservationStart::SessionStart)
+        .state()
+        .clone();
 
     assert_eq!(Some(WINDOW), state.snapshot.window);
     assert_eq!(Some(84_011), state.snapshot.reported_context_tokens);
+    assert_eq!(Some(11_880), state.snapshot.baseline_tokens);
 }
 
 #[test]
 fn the_big_read_is_priced_by_the_anchors_around_it() {
-    let state = fold(&live_trace_records()).state().clone();
+    let state = fold(&live_trace_records(), ObservationStart::SessionStart)
+        .state()
+        .clone();
 
     // 41,448 bytes of tool output between anchors 34,729 and input 43,671: 8,942 tokens, alone in
     // its span and so exact.
@@ -425,7 +434,9 @@ fn the_big_read_is_priced_by_the_anchors_around_it() {
 
 #[test]
 fn the_negative_turn_boundary_leaves_the_first_span_on_its_estimate() {
-    let state = fold(&live_trace_records()).state().clone();
+    let state = fold(&live_trace_records(), ObservationStart::SessionStart)
+        .state()
+        .clone();
 
     // Turn 1 closes at 33,318 and turn 2 opens at input 33,113: the context shrank by 205. The
     // same-turn rule never sees that, because turn 2's first anchor has no previous same-turn
@@ -441,7 +452,9 @@ fn the_negative_turn_boundary_leaves_the_first_span_on_its_estimate() {
 
 #[test]
 fn both_completed_turns_carry_their_measured_span() {
-    let state = fold(&live_trace_records()).state().clone();
+    let state = fold(&live_trace_records(), ObservationStart::SessionStart)
+        .state()
+        .clone();
 
     let turns = &state.snapshot.turns;
     assert_eq!(
@@ -472,7 +485,9 @@ fn both_completed_turns_carry_their_measured_span() {
 /// including one kind name upstream has already retired.
 #[test]
 fn the_opening_fragments_are_instructions_and_nothing_is_ambiguous() {
-    let state = fold(&live_trace_records()).state().clone();
+    let state = fold(&live_trace_records(), ObservationStart::SessionStart)
+        .state()
+        .clone();
     let items = &state.snapshot.items;
     let of_seqs = |seqs: &[u64]| {
         seqs.iter()
@@ -505,7 +520,9 @@ fn the_opening_fragments_are_instructions_and_nothing_is_ambiguous() {
 
 #[test]
 fn a_merged_fragment_message_keeps_one_part_per_content_entry() {
-    let state = fold(&live_trace_records()).state().clone();
+    let state = fold(&live_trace_records(), ObservationStart::SessionStart)
+        .state()
+        .clone();
     let items = &state.snapshot.items;
 
     let part_kinds = |index: usize| {
@@ -557,7 +574,9 @@ fn interrupted_records() -> Vec<Record> {
 
 #[test]
 fn an_interrupted_turn_strands_its_trailing_items_permanently() {
-    let state = fold(&interrupted_records()).state().clone();
+    let state = fold(&interrupted_records(), ObservationStart::MidStream)
+        .state()
+        .clone();
 
     // Only the call reached an anchor. The two items after it are stranded, and the next turn's
     // anchors price only their own span.
@@ -576,7 +595,9 @@ fn an_interrupted_turn_strands_its_trailing_items_permanently() {
 
 #[test]
 fn the_derived_views_are_ordered_by_seq_not_by_iteration() {
-    let state = fold(&live_trace_records()).state().clone();
+    let state = fold(&live_trace_records(), ObservationStart::SessionStart)
+        .state()
+        .clone();
 
     let first_members: Vec<u64> = state
         .snapshot

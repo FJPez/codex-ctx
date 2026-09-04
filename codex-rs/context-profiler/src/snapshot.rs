@@ -7,7 +7,6 @@ use crate::item::Category;
 use crate::item::ItemGroup;
 use crate::item::ItemSummary;
 use crate::item::TokenCost;
-use crate::usage::UsageSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TurnDelta {
@@ -68,7 +67,7 @@ impl InitialContextSummary {
         self.first_request_input_tokens - self.estimated_user_input_tokens
     }
 
-    /// Must agree with `ContextSnapshot::baseline_tokens`, which reaches the same figure by anchor residual.
+    /// Equals `baseline_tokens` when a baseline was established.
     pub fn hidden_tokens(&self) -> i64 {
         self.startup_context_tokens() - self.estimated_instruction_tokens
     }
@@ -82,5 +81,4 @@ pub struct ProfilerState {
     pub classification_warning_count: u32,
     /// Items whose serialized size could not be computed; unreachable for today's types.
     pub unsizable_item_count: u32,
-    pub anchors: Vec<UsageSnapshot>,
 }
