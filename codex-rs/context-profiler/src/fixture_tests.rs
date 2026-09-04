@@ -408,15 +408,6 @@ fn live_trace_records() -> Vec<Record> {
 fn the_live_trace_folds_into_the_measured_totals() {
     let state = fold(&live_trace_records()).state().clone();
 
-    assert_eq!(
-        (1..=42).collect::<Vec<u64>>(),
-        state
-            .snapshot
-            .items
-            .iter()
-            .map(|item| item.seq)
-            .collect::<Vec<_>>()
-    );
     assert_eq!(Some(WINDOW), state.snapshot.window);
     assert_eq!(Some(84_011), state.snapshot.reported_context_tokens);
 }

@@ -311,7 +311,7 @@ impl ContextProfiler {
 }
 
 /// Splits `total` across `weights` so the shares sum to exactly `total`.
-/// The rounding remainder falls on later entries.
+/// Deterministic, including when every weight is zero.
 fn apportion(total: i64, weights: &[i64]) -> Vec<i64> {
     if weights.is_empty() {
         return Vec::new();
