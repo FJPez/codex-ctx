@@ -71,7 +71,11 @@ impl App {
             }
             AppEvent::CloseMisalignmentReview => self.chat_widget.show_misalignment_policy_precaution(),
             AppEvent::SkillsListLoaded { ref cwd, .. }
-            | AppEvent::PluginMentionsLoaded { ref cwd, .. }
+                if cwds_differ(cwd, self.config.cwd.as_path()) =>
+            {
+                self.skill_load_warnings.startup_complete = true;
+            }
+            AppEvent::PluginMentionsLoaded { ref cwd, .. }
                 if cwds_differ(cwd, self.config.cwd.as_path()) => {}
             AppEvent::NewSession { name } => {
                 self.start_fresh_session_with_summary_hint(
@@ -1150,6 +1154,7 @@ impl App {
                     result.map_err(|err| color_eyre::eyre::eyre!(err)),
                     "failed to load skills on startup",
                 );
+                self.skill_load_warnings.startup_complete = true;
             }
             AppEvent::StartFileSearch(query) => {
                 self.file_search.on_user_query(query.clone());
@@ -1628,12 +1633,13 @@ impl App {
                     .await;
 
                 if let Some(default_effort) = default_effort.as_ref()
-                    && let Err(err) = crate::config_update::write_config_batch(
+                    && let Err(err) = self.persist_model_defaults(
                         app_server.request_handle(),
                         crate::config_update::build_model_selection_edits(
                             model.as_str(),
                             Some(default_effort),
                         ),
+                        "default model and reasoning effort",
                     )
                     .await
                 {
@@ -2156,16 +2162,17 @@ impl App {
                 }
             }
             AppEvent::PersistModelSelection { model, effort } => {
-                match crate::config_update::write_config_batch(
+                match self.persist_model_defaults(
                     app_server.request_handle(),
                     crate::config_update::build_model_selection_edits(
                         model.as_str(),
                         effort.as_ref(),
                     ),
+                    "default model and reasoning effort",
                 )
                 .await
                 {
-                    Ok(_) => {
+                    Ok(()) => {
                         let effort_label = effort
                             .as_ref()
                             .map(std::string::ToString::to_string)
@@ -2258,10 +2265,10 @@ impl App {
                 let edits = crate::config_update::build_service_tier_selection_edits(
                     service_tier.as_deref(),
                 );
-                match crate::config_update::write_config_batch(app_server.request_handle(), edits)
+                match self.persist_model_defaults(app_server.request_handle(), edits, "default service tier")
                     .await
                 {
-                    Ok(_) => {
+                    Ok(()) => {
                         let message = if let Some(service_tier) = service_tier {
                             format!("Service tier set to {service_tier}")
                         } else {
@@ -2398,11 +2405,10 @@ impl App {
                 }
             }
             AppEvent::FetchExperimentalFeatures { thread_id, response_tx } => {
-                crate::experimental_features::fetch(
-                    app_server.request_handle(),
-                    thread_id,
-                    response_tx,
-                );
+                self.fetch_experimental_features(app_server, thread_id, response_tx);
+            }
+            AppEvent::SaveExperimentalFeatures { thread_id, updates, response_tx } => {
+                self.save_experimental_features(app_server, thread_id, updates, response_tx);
             }
             AppEvent::UpdateFeatureFlags { updates } => {
                 self.update_feature_flags(app_server, updates).await;
@@ -2478,9 +2484,10 @@ impl App {
                 } else {
                     crate::config_update::clear_config_value(key_path)
                 };
-                if let Err(err) = crate::config_update::write_config_batch(
+                if let Err(err) = self.persist_model_defaults(
                     app_server.request_handle(),
                     vec![edit],
+                    "Plan mode reasoning effort",
                 )
                 .await
                 {
@@ -2976,9 +2983,11 @@ impl App {
             } => {
                 self.apply_keymap_capture(context, action, key, intent)
                     .await;
+                self.merge_startup_warnings(tui, &history_cell::StartupWarningsCell::default());
             }
             AppEvent::KeymapCleared { context, action } => {
                 self.apply_keymap_clear(context, action).await;
+                self.merge_startup_warnings(tui, &history_cell::StartupWarningsCell::default());
             }
             AppEvent::GenerateRecap { thread_id } => {
                 if self.current_displayed_thread_id() == Some(thread_id) {

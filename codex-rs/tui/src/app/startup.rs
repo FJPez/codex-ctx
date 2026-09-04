@@ -127,7 +127,11 @@ impl App {
         let startup_started_at = Instant::now();
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
-        emit_project_config_warnings(&app_event_tx, &config);
+        if let Some(message) = project_config_warning(&config) {
+            app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                history_cell::StartupWarningsCell::new(vec![message]),
+            )));
+        }
         emit_system_bwrap_warning(&app_event_tx, &config);
         tui.set_notification_settings(
             local_settings.tui.notification_settings.method,
@@ -510,6 +514,7 @@ See the Codex keymap documentation for supported actions and examples."
         };
 
         let mut app = Self {
+            feature_write_lock: Arc::default(),
             model_catalog,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
@@ -713,6 +718,11 @@ See the Codex keymap documentation for supported actions and examples."
         // already has data and available reset credits can be surfaced, without
         // delaying the initial frame render.
         if requires_openai_auth && has_chatgpt_account {
+            crate::daybreak::prefetch_notice(
+                &app.config,
+                &app_server,
+                app.chat_widget.cyber_policy_notice.clone(),
+            );
             let reset_hint_request_id = app.chat_widget.start_rate_limit_reset_startup_check();
             app.refresh_rate_limits(
                 &app_server,
