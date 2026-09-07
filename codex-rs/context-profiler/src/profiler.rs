@@ -17,9 +17,17 @@ use crate::item::PricingKind;
 use crate::item::TokenCost;
 use crate::kind::call_id;
 use crate::kind::item_kind;
+use crate::snapshot::InitialContextSummary;
 use crate::snapshot::ProfilerState;
 use crate::snapshot::TurnDelta;
 use crate::usage::UsageSnapshot;
+
+/// Whether this profiler saw the session's first request; only then is a baseline claimable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationStart {
+    SessionStart,
+    MidStream,
+}
 
 /// How a turn stopped, since only a completed turn has a trustworthy closing anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +48,7 @@ struct OpenTurn {
     last_anchor_seq: Option<u64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ContextProfiler {
     state: ProfilerState,
     /// Items observed so far; incremented before it is stamped, matching the TUI adapter.
@@ -48,11 +56,19 @@ pub struct ContextProfiler {
     /// Survives turn ends: the next turn's `measured_before`.
     last_anchor_total: Option<i64>,
     open_turn: Option<OpenTurn>,
+    /// Set until the first anchor, or until an event disqualifies the baseline.
+    baseline_pending: bool,
 }
 
 impl ContextProfiler {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(start: ObservationStart) -> Self {
+        Self {
+            state: ProfilerState::default(),
+            items_seen: 0,
+            last_anchor_total: None,
+            open_turn: None,
+            baseline_pending: matches!(start, ObservationStart::SessionStart),
+        }
     }
 
     pub fn state(&self) -> &ProfilerState {
@@ -122,10 +138,11 @@ impl ContextProfiler {
                     turn.last_anchor = Some(total);
                     turn.last_anchor_seq = Some(items_seen);
                 }
-                self.state.anchors.push(usage);
+                self.reconcile_at_anchor(&usage);
             }
             ProfilerEvent::UsageMissing { turn_id } => {
                 self.ensure_open_turn(turn_id);
+                self.baseline_pending = false;
                 self.last_anchor_total = None;
                 let items_seen = self.items_seen;
                 if let Some(turn) = self.open_turn.as_mut() {
@@ -207,6 +224,44 @@ impl ContextProfiler {
         self.rebuild_aggregates();
     }
 
+    /// The first anchor of a session measures the whole prefix, so what it does not explain is the
+    /// startup baseline. Later anchors only move drift.
+    /// See the design spec, Reconciliation.
+    fn reconcile_at_anchor(&mut self, usage: &UsageSnapshot) {
+        if self.baseline_pending {
+            self.baseline_pending = false;
+            let first_turn = self.open_turn.as_ref().is_some_and(|turn| turn.index == 0);
+            if self.items_seen >= 1 && first_turn && !self.span_is_ambiguous(&(1..=self.items_seen))
+            {
+                let summary = InitialContextSummary {
+                    first_request_input_tokens: usage.input_tokens,
+                    estimated_user_input_tokens: self.category_tokens(Category::UserMessage),
+                    estimated_instruction_tokens: self.category_tokens(Category::Instructions),
+                };
+                let residual =
+                    usage.reported_context_tokens - self.state.snapshot.attributed_tokens();
+                if summary.hidden_tokens() == residual && residual >= 0 {
+                    self.state.snapshot.baseline_tokens = Some(residual);
+                    self.state.snapshot.initial_context = Some(summary);
+                }
+            }
+        }
+        if let Some(baseline) = self.state.snapshot.baseline_tokens {
+            self.state.snapshot.drift_tokens =
+                usage.reported_context_tokens - self.state.snapshot.attributed_tokens() - baseline;
+        }
+    }
+
+    fn category_tokens(&self, category: Category) -> i64 {
+        self.state
+            .snapshot
+            .items
+            .iter()
+            .filter(|item| item.category == category)
+            .map(|item| item.cost.tokens())
+            .sum()
+    }
+
     fn span_is_ambiguous(&self, span: &RangeInclusive<u64>) -> bool {
         self.state
             .snapshot
@@ -248,6 +303,7 @@ impl ContextProfiler {
         let Some(turn) = self.open_turn.take() else {
             return;
         };
+        self.baseline_pending = false;
         let item_seq_range = turn.first_seq..=self.items_seen;
         let estimated_added = self
             .state
@@ -340,6 +396,10 @@ fn apportion(total: i64, weights: &[i64]) -> Vec<i64> {
     }
     shares
 }
+
+#[cfg(test)]
+#[path = "reconcile_tests.rs"]
+mod reconcile_tests;
 
 #[cfg(test)]
 #[path = "profiler_tests.rs"]

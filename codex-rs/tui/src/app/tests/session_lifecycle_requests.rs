@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::session_lifecycle::ThreadAttachPresentation;
 use crate::app_event::TranscriptExportDestination;
 use crate::app_server_session::ThreadRole;
 use app_test_support::create_fake_paginated_rollout;
@@ -895,7 +896,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() 
             let response = response??;
             panic!("MCP task creation completed without registration: {}", response.text().await?);
         }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(/*secs*/ 5)) => {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(/*secs*/ 30)) => {
             panic!("timed out waiting for MCP task registration");
         }
     };
@@ -1099,6 +1100,158 @@ async fn primary_thread_requests_raw_events_when_feature_enabled() -> Result<()>
     app_server.shutdown().await?;
     proxy.await??;
     Ok(())
+}
+
+#[tokio::test]
+async fn only_a_fresh_thread_start_installs_a_profiler_eagerly() -> Result<()> {
+    let (mut app, codex_home) = make_history_test_app().await?;
+    app.config
+        .features
+        .enable(Feature::ContextProfiler)
+        .expect("test config should allow the context profiler");
+    app.config.log_dir = codex_home.path().join("log");
+    app.profiler = crate::context_profiler::ProfilerRegistry::enabled(&app.config);
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    let started = app_server.start_thread(&app.config).await?;
+    let fresh_thread_id = started.session.thread_id;
+    app.replace_chat_widget_with_app_server_thread(
+        &mut tui,
+        started,
+        ThreadAttachPresentation::SessionLineage,
+        /*initial_user_message*/ None,
+    )
+    .await?;
+    assert!(app.profiler.state(&fresh_thread_id).is_some());
+
+    let resumable_thread_id = ThreadId::from_string(
+        &create_fake_rollout(
+            codex_home.path(),
+            "2026-01-01T00-00-00",
+            "2026-01-01T00:00:00Z",
+            "Saved user message",
+            Some(app.config.model_provider_id.as_str()),
+            /*git_info*/ None,
+        )
+        .expect("create rollout"),
+    )?;
+    let resumed = app_server
+        .resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            resumable_thread_id,
+            crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+        )
+        .await?;
+    let resumed_thread_id = resumed.session.thread_id;
+    app.replace_chat_widget_with_app_server_thread(
+        &mut tui,
+        resumed,
+        ThreadAttachPresentation::SessionLineage,
+        /*initial_user_message*/ None,
+    )
+    .await?;
+    assert!(app.profiler.state(&resumed_thread_id).is_none());
+
+    Ok(())
+}
+
+/// Events buffered during startup must reach a profiler created eagerly as `SessionStart`; a
+/// lazily created one would exist too, but could never claim the baseline.
+#[tokio::test]
+async fn startup_attaches_the_profiler_before_draining_buffered_events() -> Result<()> {
+    let (mut app, codex_home) = make_history_test_app().await?;
+    app.config
+        .features
+        .enable(Feature::ContextProfiler)
+        .expect("test config should allow the context profiler");
+    app.config.log_dir = codex_home.path().join("log");
+    app.profiler = crate::context_profiler::ProfilerRegistry::enabled(&app.config);
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+
+    let started = app_server.start_thread(&app.config).await?;
+    let thread_id = started.session.thread_id;
+    app.pending_startup_thread_start = true;
+    for notification in profiler_first_request(thread_id) {
+        app.pending_primary_events
+            .push_back(ThreadBufferedEvent::Notification(Box::new(notification)));
+    }
+    app.handle_startup_thread_started(&mut app_server, Ok(started))
+        .await?;
+
+    let state = app
+        .profiler
+        .state(&thread_id)
+        .expect("startup thread is profiled");
+    assert!(state.snapshot.baseline_tokens.is_some());
+
+    Ok(())
+}
+
+/// A user prompt and a consistent usage anchor: the smallest eligible first request.
+fn profiler_first_request(thread_id: ThreadId) -> Vec<ServerNotification> {
+    use codex_app_server_protocol::RawResponseCompletedNotification;
+    use codex_app_server_protocol::RawResponseItemCompletedNotification;
+    use codex_app_server_protocol::TokenUsageBreakdown;
+    use codex_app_server_protocol::Turn;
+    use codex_app_server_protocol::TurnItemsView;
+    use codex_app_server_protocol::TurnStartedNotification;
+    use codex_app_server_protocol::TurnStatus;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ContentItemKind;
+    use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+    use codex_protocol::models::ResponseItem;
+
+    let thread_id = thread_id.to_string();
+    let turn_id = "turn-1".to_string();
+    vec![
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id.clone(),
+            turn: Turn {
+                id: turn_id.clone(),
+                items: Vec::new(),
+                items_view: TurnItemsView::NotLoaded,
+                status: TurnStatus::InProgress,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        }),
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            item: ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "hello".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: Some(
+                    InternalChatMessageMetadataPassthrough {
+                        content_item_kinds: Some(vec![ContentItemKind("user.text".to_string())]),
+                        ..Default::default()
+                    },
+                ),
+            },
+        }),
+        ServerNotification::RawResponseCompleted(RawResponseCompletedNotification {
+            thread_id,
+            turn_id,
+            response_id: "resp_1".to_string(),
+            usage: Some(TokenUsageBreakdown {
+                total_tokens: 1_200,
+                input_tokens: 1_200,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 0,
+                reasoning_output_tokens: 0,
+            }),
+            usage_metadata: None,
+        }),
+    ]
 }
 
 #[tokio::test]

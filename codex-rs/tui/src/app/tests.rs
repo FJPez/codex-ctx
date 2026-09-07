@@ -4845,6 +4845,7 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
             turns: Vec::new(),
             blocks_direct_input: false,
             task_tools_available: false,
+            freshly_started: false,
         },
         &mut child_snapshot,
     )
@@ -7814,6 +7815,7 @@ async fn refreshed_snapshot_session_persists_resumed_turns() {
             turns: resumed_turns.clone(),
             blocks_direct_input: true,
             task_tools_available: false,
+            freshly_started: false,
         },
         &mut snapshot,
     )
