@@ -273,8 +273,8 @@ fn no_data() {
 
 /// Labels give way to the ellipsis; numbers never do.
 #[test]
-fn narrow_48_columns() {
-    insta::assert_snapshot!(render(&normal_state(), 48));
+fn narrow_40_columns() {
+    insta::assert_snapshot!(render(&normal_state(), 40));
 }
 
 #[test]
