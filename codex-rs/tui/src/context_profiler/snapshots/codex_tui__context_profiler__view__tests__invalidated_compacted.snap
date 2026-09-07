@@ -1,0 +1,12 @@
+---
+source: tui/src/context_profiler/card_tests.rs
+expression: "render(profiler.state(), 80)"
+---
+/ctx
+
+╭──────────────────────────────────────────────────────╮
+│ ⚠ Context breakdown incomplete                       │
+│ The context was compacted                            │
+│ Attribution unavailable for the rest of this session │
+│ See /status for current usage                        │
+╰──────────────────────────────────────────────────────╯
