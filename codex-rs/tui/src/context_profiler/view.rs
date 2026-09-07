@@ -32,6 +32,8 @@ const SHARE_WIDTH: usize = 4;
 const SHARE_HEADING: &str = "share of context";
 /// The marker for a turn with no prior anchor to measure against.
 const NO_ANCHOR: &str = "\u{2014}";
+/// Gap between two columns.
+const GAP: usize = 2;
 
 pub(crate) fn new_context_card_cell(card: ContextCard) -> CompositeHistoryCell {
     let command = PlainHistoryCell::new(vec!["/ctx".magenta().into()]);
@@ -62,7 +64,15 @@ impl HistoryCell for ContextCardCell {
     }
 }
 
+/// Rows are laid out to fit `inner_width`; the ellipsis pass only catches the prose lines.
 fn content_lines(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
+    card_lines(card, inner_width)
+        .into_iter()
+        .map(|line| truncate_line_with_ellipsis_if_overflow(line, inner_width))
+        .collect()
+}
+
+fn card_lines(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
     if let Some(reason) = card.invalidated.as_ref() {
         return invalidated_lines(reason);
     }
@@ -72,11 +82,12 @@ fn content_lines(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
 
     let blocks = vec![
         context_block(card),
-        startup_block(card),
-        attributed_block(card),
-        not_attributable_block(card),
+        startup_block(card, inner_width),
+        attributed_block(card, inner_width),
+        pending_block(card),
+        not_attributable_block(card, inner_width),
         contributors_block(card, inner_width),
-        turns_block(card),
+        turns_block(card, inner_width),
         warnings_block(card),
     ];
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -133,7 +144,7 @@ fn context_block(card: &ContextCard) -> Vec<Line<'static>> {
     vec![spans.into()]
 }
 
-fn startup_block(card: &ContextCard) -> Vec<Line<'static>> {
+fn startup_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
     match &card.startup {
         Startup::Unavailable => {
             vec!["Startup context unavailable for this session".dim().into()]
@@ -154,19 +165,21 @@ fn startup_block(card: &ContextCard) -> Vec<Line<'static>> {
                 estimated(*instructions),
                 estimated(*baseline),
             ];
-            let label_width = widest(labels.iter().copied());
             let number_width = widest(numbers.iter().map(String::as_str));
+            let label_width =
+                widest(labels.iter().copied()).min(label_budget(inner_width, GAP + number_width));
             let mut lines: Vec<Line<'static>> = Vec::new();
             for (position, (label, number)) in labels.iter().zip(numbers.iter()).enumerate() {
+                let label = shorten(label, label_width);
                 let label_span = if position == 0 {
-                    (*label).bold()
+                    label.clone().bold()
                 } else {
-                    Span::from(*label)
+                    Span::from(label.clone())
                 };
                 lines.push(
                     vec![
                         label_span,
-                        Span::from(pad_to(label, label_width)),
+                        Span::from(pad_to(&label, label_width)),
                         "  ".into(),
                         Span::from(pad_left(number, number_width)),
                     ]
@@ -188,9 +201,17 @@ fn startup_block(card: &ContextCard) -> Vec<Line<'static>> {
 struct TableWidths {
     name: usize,
     number: usize,
+    /// The gap plus percent column, or zero when no row carries a share.
+    share: usize,
 }
 
-fn table_widths(card: &ContextCard) -> TableWidths {
+impl TableWidths {
+    fn row_width(&self) -> usize {
+        2 + self.name + GAP + self.number + self.share
+    }
+}
+
+fn table_widths(card: &ContextCard, inner_width: usize) -> TableWidths {
     let footer_name = card.footer.map(|_| "Reported context");
     let names = card
         .categories
@@ -213,21 +234,27 @@ fn table_widths(card: &ContextCard) -> TableWidths {
     if let Some(reported) = card.footer {
         numbers.push(format_with_separators(reported));
     }
+    let has_shares = card.footer.is_some()
+        || card
+            .categories
+            .iter()
+            .chain(card.not_attributable.iter())
+            .any(|row| row.share_percent.is_some());
+    let share = if has_shares { GAP + SHARE_WIDTH } else { 0 };
+    let number = widest(numbers.iter().map(String::as_str));
+    let name = widest(names).min(label_budget(inner_width, 2 + GAP + number + share));
     TableWidths {
-        name: widest(names),
-        number: widest(numbers.iter().map(String::as_str)),
+        name,
+        number,
+        share,
     }
 }
 
-fn attributed_block(card: &ContextCard) -> Vec<Line<'static>> {
+fn attributed_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
     if card.categories.is_empty() {
         return Vec::new();
     }
-    let widths = table_widths(card);
-    let has_shares = card
-        .categories
-        .iter()
-        .any(|row| row.share_percent.is_some());
+    let widths = table_widths(card, inner_width);
     let largest_share = card
         .categories
         .iter()
@@ -236,21 +263,22 @@ fn attributed_block(card: &ContextCard) -> Vec<Line<'static>> {
         .unwrap_or(0);
 
     let mut heading = vec!["Attributed to items".bold()];
-    if has_shares {
-        let column_end = 2 + widths.name + 2 + widths.number + 2 + SHARE_WIDTH;
-        let gap = column_end
+    if widths.share > 0 {
+        let gap = widths
+            .row_width()
             .saturating_sub(SHARE_HEADING.len())
             .saturating_sub("Attributed to items".len())
             .max(1);
         heading.push(Span::from(" ".repeat(gap)));
         heading.push(SHARE_HEADING.dim());
     }
+    let bar_cells = inner_width.saturating_sub(widths.row_width() + GAP);
     let mut lines: Vec<Line<'static>> = vec![heading.into()];
     for row in &card.categories {
         lines.push(table_row(
             row,
             &widths,
-            bar(row.share_percent, largest_share),
+            bar(row.share_percent, largest_share, bar_cells),
         ));
     }
     lines.push(rule(&widths));
@@ -260,21 +288,26 @@ fn attributed_block(card: &ContextCard) -> Vec<Line<'static>> {
         /*share*/ None,
         &widths,
     ));
-    if card.usage == Usage::Pending {
-        lines.push(
-            "Awaiting updated usage; run /ctx again after the response completes"
-                .dim()
-                .into(),
-        );
-    }
     lines
 }
 
-fn not_attributable_block(card: &ContextCard) -> Vec<Line<'static>> {
+/// Rendered whenever usage is stale, whether or not any category row exists.
+fn pending_block(card: &ContextCard) -> Vec<Line<'static>> {
+    if card.usage != Usage::Pending {
+        return Vec::new();
+    }
+    vec![
+        "Awaiting updated usage; run /ctx again after the response completes"
+            .dim()
+            .into(),
+    ]
+}
+
+fn not_attributable_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
     if card.not_attributable.is_empty() && card.footer.is_none() {
         return Vec::new();
     }
-    let widths = table_widths(card);
+    let widths = table_widths(card, inner_width);
     let mut lines: Vec<Line<'static>> = card
         .not_attributable
         .iter()
@@ -307,10 +340,10 @@ fn contributors_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'stati
         .contributors
         .iter()
         .any(|entry| entry.share_percent.is_some());
-    let share_width = if has_shares { 2 + SHARE_WIDTH } else { 0 };
-    let fixed = 2 + 1 + 2 + category_width + 2 + 2 + number_width + share_width;
+    let share_width = if has_shares { GAP + SHARE_WIDTH } else { 0 };
+    let fixed = 2 + 1 + GAP + category_width + GAP + GAP + number_width + share_width;
     let label_width = widest(card.contributors.iter().map(|entry| entry.label.as_str()))
-        .min(inner_width.saturating_sub(fixed).max(1));
+        .min(label_budget(inner_width, fixed));
 
     let mut heading = vec!["Largest contributors".bold()];
     if card
@@ -338,19 +371,14 @@ fn contributor_row(
     label_width: usize,
     number_width: usize,
 ) -> Line<'static> {
-    let label = truncate_line_with_ellipsis_if_overflow(entry.label.clone().into(), label_width);
-    let label_text: String = label
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
+    let label = shorten(&entry.label, label_width);
     let mut spans = vec![
         Span::from(format!("  {}  ", entry.rank)),
         Span::from(entry.category.to_string()).dim(),
         Span::from(pad_to(entry.category, category_width)),
         "  ".into(),
-        Span::from(label_text.clone()),
-        Span::from(pad_to(&label_text, label_width)),
+        Span::from(label.clone()),
+        Span::from(pad_to(&label, label_width)),
         "  ".into(),
         Span::from(pad_left(&cost_text(entry.tokens), number_width)),
     ];
@@ -361,7 +389,7 @@ fn contributor_row(
     spans.into()
 }
 
-fn turns_block(card: &ContextCard) -> Vec<Line<'static>> {
+fn turns_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
     if card.turns.is_empty() {
         return Vec::new();
     }
@@ -384,13 +412,23 @@ fn turns_block(card: &ContextCard) -> Vec<Line<'static>> {
     let context_width = widest(context.iter().map(String::as_str)).max("context".len());
 
     let count = card.turns.len();
-    let heading_text = format!("Last {count} turns");
+    let heading_text = if count == 1 {
+        "Last turn".to_string()
+    } else {
+        format!("Last {count} turns")
+    };
     // The turn column is as wide as the heading so the column heads sit over their values.
-    let turn_width = (2 + widest(numbers.iter().map(String::as_str))).max(heading_text.len());
+    let number_width = 2 + widest(numbers.iter().map(String::as_str));
+    let turn_width = number_width.max(heading_text.len()).min(
+        inner_width
+            .saturating_sub(GAP + added_width + GAP + context_width)
+            .max(number_width),
+    );
+    let heading = shorten(&heading_text, turn_width);
     let mut lines: Vec<Line<'static>> = vec![
         vec![
-            heading_text.clone().bold(),
-            Span::from(pad_to(&heading_text, turn_width)),
+            heading.clone().bold(),
+            Span::from(pad_to(&heading, turn_width)),
             "  ".into(),
             Span::from(pad_left("added", added_width)).dim(),
             "  ".into(),
@@ -444,11 +482,12 @@ fn table_row(row: &Row, widths: &TableWidths, bar: Option<String>) -> Line<'stat
 fn number_row(
     name: &str,
     number: String,
-    share: Option<u8>,
+    share: Option<u32>,
     widths: &TableWidths,
 ) -> Line<'static> {
+    let name = shorten(name, widths.name);
     let mut spans = vec![
-        Span::from(format!("  {}", pad_right(name, widths.name))),
+        Span::from(format!("  {}", pad_right(&name, widths.name))),
         "  ".into(),
         Span::from(pad_left(&number, widths.number)),
     ];
@@ -460,18 +499,17 @@ fn number_row(
 }
 
 fn rule(widths: &TableWidths) -> Line<'static> {
-    "\u{2500}"
-        .repeat(2 + widths.name + 2 + widths.number)
-        .dim()
-        .into()
+    "\u{2500}".repeat(widths.row_width()).dim().into()
 }
 
-fn bar(share: Option<u8>, largest: u8) -> Option<String> {
+/// The bar scales to whatever room is left, so shares stay comparable at any width.
+fn bar(share: Option<u32>, largest: u32, max_cells: usize) -> Option<String> {
     let share = share?;
-    if share == 0 || largest == 0 {
+    let full = BAR_CELLS.min(max_cells);
+    if share == 0 || largest == 0 || full == 0 {
         return None;
     }
-    let cells = (f64::from(share) / f64::from(largest) * BAR_CELLS as f64).round() as usize;
+    let cells = (f64::from(share) / f64::from(largest) * full as f64).round() as usize;
     Some("\u{2588}".repeat(cells.max(1)))
 }
 
@@ -496,6 +534,19 @@ fn estimated(tokens: i64) -> String {
 
 fn widest<'a>(values: impl Iterator<Item = &'a str>) -> usize {
     values.map(display_width).max().unwrap_or(0)
+}
+
+/// What is left of `inner_width` for a label column once its row's other columns are taken.
+fn label_budget(inner_width: usize, fixed: usize) -> usize {
+    inner_width.saturating_sub(fixed).max(1)
+}
+
+fn shorten(text: &str, width: usize) -> String {
+    truncate_line_with_ellipsis_if_overflow(Line::from(text.to_string()), width)
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 
 /// Trailing padding that brings `text` up to `width`.

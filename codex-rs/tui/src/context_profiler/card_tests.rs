@@ -271,9 +271,10 @@ fn no_data() {
     insta::assert_snapshot!(render(profiler.state(), 80));
 }
 
+/// Labels give way to the ellipsis; numbers never do.
 #[test]
-fn narrow_40_columns() {
-    insta::assert_snapshot!(render(&normal_state(), 40));
+fn narrow_48_columns() {
+    insta::assert_snapshot!(render(&normal_state(), 48));
 }
 
 #[test]
@@ -335,14 +336,14 @@ fn contributors_are_the_three_largest_groups() {
             Contributor {
                 rank: 2,
                 category: "Agent messages",
-                label: "Message".to_string(),
+                label: "assistant.text".to_string(),
                 tokens: TokenCost::Estimated(756),
                 share_percent: Some(3),
             },
             Contributor {
                 rank: 3,
                 category: "Agent messages",
-                label: "Message".to_string(),
+                label: "assistant.text".to_string(),
                 tokens: TokenCost::Exact(400),
                 share_percent: Some(2),
             },

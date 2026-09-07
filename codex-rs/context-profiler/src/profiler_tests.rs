@@ -131,6 +131,19 @@ fn instruction_message(kind: &str, text: &str) -> ResponseItem {
     }
 }
 
+/// A message that reached us without `content_item_kinds`, so it has no kind to be named by.
+fn untagged_user_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 fn unknown_role_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
         id: None,
@@ -217,7 +230,7 @@ fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> I
         pricing: classification.pricing,
         bytes: item_bytes(item),
         cost: item_cost(item),
-        label: item_label(item).to_string(),
+        label: display_label(item, &classification.parts),
         group,
         item_id: None,
         parts: classification.parts,
@@ -1071,14 +1084,20 @@ fn an_image_takes_an_estimate_weighted_share_not_a_byte_weighted_one() {
 }
 
 #[test]
-fn tool_call_groups_are_labelled_by_tool_name() {
+fn groups_are_labelled_by_tool_name_or_content_kind() {
     let call = function_call("read_file", "call_1");
     let output = function_call_output("call_1");
     let reasoning = reasoning_item();
+    let instructions = instruction_message("agents_md.instructions", "be brief");
+    let untagged = untagged_user_message("hi");
 
     let mut profiler = profiler();
     profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
-    observe_items(&mut profiler, TURN, &[&call, &output, &reasoning]);
+    observe_items(
+        &mut profiler,
+        TURN,
+        &[&call, &output, &reasoning, &instructions, &untagged],
+    );
 
     let labels: Vec<&str> = profiler
         .state()
@@ -1087,7 +1106,15 @@ fn tool_call_groups_are_labelled_by_tool_name() {
         .iter()
         .map(|group| group.label.as_str())
         .collect();
-    assert_eq!(vec!["read_file", "Reasoning"], labels);
+    assert_eq!(
+        vec![
+            "read_file",
+            "Reasoning",
+            "agents_md.instructions",
+            "Message"
+        ],
+        labels
+    );
 }
 
 #[test]

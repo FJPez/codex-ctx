@@ -43,7 +43,7 @@ pub(crate) enum Startup {
 pub(crate) struct Row {
     pub(crate) name: &'static str,
     pub(crate) tokens: TokenCost,
-    pub(crate) share_percent: Option<u8>,
+    pub(crate) share_percent: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +52,7 @@ pub(crate) struct Contributor {
     pub(crate) category: &'static str,
     pub(crate) label: String,
     pub(crate) tokens: TokenCost,
-    pub(crate) share_percent: Option<u8>,
+    pub(crate) share_percent: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,16 +222,14 @@ fn combine(left: TokenCost, right: TokenCost) -> TokenCost {
 }
 
 /// A negative remainder has no honest share of the reported total, so it carries none.
-fn share(tokens: i64, denominator: Option<i64>) -> Option<u8> {
+fn share(tokens: i64, denominator: Option<i64>) -> Option<u32> {
     let reported = denominator?;
     if tokens < 0 {
         return None;
     }
     // A frozen baseline can outgrow a shrunken total, so shares above 100% are kept.
-    let percent = (tokens as f64 * 100.0 / reported as f64)
-        .round()
-        .clamp(0.0, f64::from(u8::MAX));
-    Some(percent as u8)
+    let percent = (tokens as f64 * 100.0 / reported as f64).round();
+    Some(percent as u32)
 }
 
 fn category_name(category: Category) -> &'static str {

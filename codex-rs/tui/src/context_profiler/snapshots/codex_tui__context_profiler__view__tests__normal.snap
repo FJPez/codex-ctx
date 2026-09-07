@@ -19,18 +19,18 @@ expression: "render(&normal_state(), 80)"
 │   Instructions                ~227    1%  ███            │
 │   Reasoning                    ~71    0%                 │
 │   User messages                ~34    0%                 │
-│ ──────────────────────────────────                       │
+│ ────────────────────────────────────────                 │
 │   total                     ~2,861                       │
 │                                                          │
 │   System + tools baseline  ~19,755   86%                 │
 │   Reconciliation drift        ~384    2%                 │
-│ ──────────────────────────────────                       │
+│ ────────────────────────────────────────                 │
 │   Reported context          23,000  100%                 │
 │                                                          │
 │ Largest contributors (estimated)                         │
-│   1  Tool calls      read_file  ~1,373    6%             │
-│   2  Agent messages  Message      ~756    3%             │
-│   3  Agent messages  Message       400    2%             │
+│   1  Tool calls      read_file       ~1,373    6%        │
+│   2  Agent messages  assistant.text    ~756    3%        │
+│   3  Agent messages  assistant.text     400    2%        │
 │                                                          │
 │ Last 2 turns   added  context                            │
 │   2           +2,200   23,000                            │

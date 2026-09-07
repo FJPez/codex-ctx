@@ -2,6 +2,9 @@
 
 use codex_protocol::models::ResponseItem;
 
+use crate::classify::UNKNOWN_KIND;
+use crate::item::ContentPart;
+
 /// Exhaustive so a new upstream `ResponseItem` variant fails the build.
 pub fn item_kind(item: &ResponseItem) -> &'static str {
     match item {
@@ -46,6 +49,20 @@ pub(crate) fn item_label(item: &ResponseItem) -> &str {
         | ResponseItem::ConfigurationUpdate { .. }
         | ResponseItem::ContextCompaction { .. }
         | ResponseItem::Other => item_kind(item),
+    }
+}
+
+/// The name shown for an item. A message is named by the kind core stamped on its first content
+/// entry, which distinguishes injected fragments from what the user actually typed.
+pub(crate) fn display_label(item: &ResponseItem, parts: &[ContentPart]) -> String {
+    match item {
+        ResponseItem::Message { .. } => parts
+            .first()
+            .map(|part| part.kind.as_str())
+            .filter(|kind| !kind.is_empty() && *kind != UNKNOWN_KIND)
+            .unwrap_or_else(|| item_label(item))
+            .to_string(),
+        _ => item_label(item).to_string(),
     }
 }
 

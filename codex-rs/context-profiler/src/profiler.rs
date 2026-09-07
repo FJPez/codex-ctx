@@ -16,7 +16,7 @@ use crate::item::ItemSummary;
 use crate::item::PricingKind;
 use crate::item::TokenCost;
 use crate::kind::call_id;
-use crate::kind::item_label;
+use crate::kind::display_label;
 use crate::snapshot::InitialContextSummary;
 use crate::snapshot::ProfilerState;
 use crate::snapshot::TurnDelta;
@@ -112,7 +112,7 @@ impl ContextProfiler {
                     pricing: classification.pricing,
                     bytes: size.unwrap_or(0),
                     cost: TokenCost::Estimated(estimate),
-                    label: item_label(item).to_string(),
+                    label: display_label(item, &classification.parts),
                     group,
                     item_id: item.id().map(ToString::to_string),
                     parts: classification.parts,

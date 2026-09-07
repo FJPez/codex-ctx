@@ -21,12 +21,13 @@ expression: "render(profiler.state(), 80)"
 │   User messages      ~34                                            │
 │ ────────────────────────                                            │
 │   total           ~2,964                                            │
+│                                                                     │
 │ Awaiting updated usage; run /ctx again after the response completes │
 │                                                                     │
 │ Largest contributors (estimated)                                    │
-│   1  Tool calls      read_file  ~1,373                              │
-│   2  Agent messages  Message      ~756                              │
-│   3  Agent messages  Message       400                              │
+│   1  Tool calls      read_file       ~1,373                         │
+│   2  Agent messages  assistant.text    ~756                         │
+│   3  Agent messages  assistant.text     400                         │
 │                                                                     │
 │ Last 2 turns   added  context                                       │
 │   2           +2,200   23,000                                       │
