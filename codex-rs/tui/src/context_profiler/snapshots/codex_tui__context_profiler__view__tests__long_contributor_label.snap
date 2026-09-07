@@ -4,35 +4,35 @@ expression: "render(profiler.state(), 80)"
 ---
 /ctx
 
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ Context  23,000 / 272,000   96% remaining                                    │
-│                                                                              │
-│ Startup context                         ~19,982                              │
-│   instructions                             ~227                              │
-│   system + tools baseline (reconciled)  ~19,755                              │
-│   ↳ measured: first request = 20,000 input tokens                            │
-│                                                                              │
-│ Attributed to items     share of context                                     │
-│   Agent messages            ~1,156    5%  ██████████████                     │
-│   Tool outputs                 800    3%  ████████                           │
-│   Tool calls                  ~584    3%  ████████                           │
-│   Instructions                ~227    1%  ███                                │
-│   Reasoning                    ~60    0%                                     │
-│   User messages                ~34    0%                                     │
-│ ────────────────────────────────────────                                     │
-│   total                     ~2,861                                           │
-│                                                                              │
-│   System + tools baseline  ~19,755   86%                                     │
-│   Reconciliation drift        ~384    2%                                     │
-│ ────────────────────────────────────────                                     │
-│   Reported context          23,000  100%                                     │
-│                                                                              │
-│ Largest contributors (estimated)                                             │
-│   1  Tool calls      nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn…  ~1,384    6% │
-│   2  Agent messages  assistant.text                               ~756    3% │
-│   3  Agent messages  assistant.text                                400    2% │
-│                                                                              │
-│ Last 2 turns   added  context                                                │
-│   2           +2,200   23,000                                                │
-│   1                —   20,800                                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─────────────────────────────────────────────────────────────────────╮
+│ Context  23,000 / 272,000   96% remaining                           │
+│                                                                     │
+│ Startup context                         ~19,982                     │
+│   instructions                             ~227                     │
+│   system + tools baseline (reconciled)  ~19,755                     │
+│   ↳ measured: first request = 20,000 input tokens                   │
+│                                                                     │
+│ Attributed to items     share of context                            │
+│   Agent messages            ~1,156    5%  ██████████████            │
+│   Tool outputs                 800    3%  ████████                  │
+│   Tool calls                  ~584    3%  ████████                  │
+│   Instructions                ~227    1%  ███                       │
+│   Reasoning                    ~60    0%                            │
+│   User messages                ~34    0%                            │
+│ ────────────────────────────────────────                            │
+│   total                     ~2,861                                  │
+│                                                                     │
+│   System + tools baseline  ~19,755   86%                            │
+│   Reconciliation drift        ~384    2%                            │
+│ ────────────────────────────────────────                            │
+│   Reported context          23,000  100%                            │
+│                                                                     │
+│ Largest contributors (estimated)                                    │
+│   1  Tool calls      nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn…  ~1,384    6% │
+│   2  Agent messages  assistant.text                      ~756    3% │
+│   3  Agent messages  assistant.text                       400    2% │
+│                                                                     │
+│ Last 2 turns   added  context                                       │
+│   2           +2,200   23,000                                       │
+│   1                —   20,800                                       │
+╰─────────────────────────────────────────────────────────────────────╯

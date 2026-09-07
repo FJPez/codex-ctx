@@ -10,7 +10,8 @@ expression: "render(&normal_state(), 40)"
 │ Startup context              ~19,982 │
 │   instructions                  ~227 │
 │   system + tools baseline …  ~19,755 │
-│   ↳ measured: first request = 20,00… │
+│   ↳ measured: first request = 20,000 │
+│     input tokens                     │
 │                                      │
 │ Attributed to items share of context │
 │   Agent messages        ~1,156    5% │

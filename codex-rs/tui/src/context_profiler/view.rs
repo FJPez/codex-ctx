@@ -34,6 +34,10 @@ const SHARE_HEADING: &str = "share of context";
 const NO_ANCHOR: &str = "\u{2014}";
 /// Gap between two columns.
 const GAP: usize = 2;
+/// Widest a contributor label may grow before it is shortened, so one label cannot widen the card.
+const LABEL_CELLS: usize = 32;
+/// Prose wraps to the tables' width, but never tighter than this.
+const MIN_PROSE_WIDTH: usize = 40;
 
 pub(crate) fn new_context_card_cell(card: ContextCard) -> CompositeHistoryCell {
     let command = PlainHistoryCell::new(vec!["/ctx".magenta().into()]);
@@ -80,15 +84,39 @@ fn card_lines(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
         return vec!["Context profiler has no data for this thread yet.".into()];
     }
 
+    // Tables set the card's width; prose wraps to it rather than widening it.
+    let context = context_block(card);
+    let mut startup = startup_rows(card, inner_width);
+    let attributed = attributed_block(card, inner_width);
+    let not_attributable = not_attributable_block(card, inner_width);
+    let contributors = contributors_block(card, inner_width);
+    let turns = turns_block(card, inner_width);
+    let prose_width = [
+        &context,
+        &startup,
+        &attributed,
+        &not_attributable,
+        &contributors,
+        &turns,
+    ]
+    .into_iter()
+    .flatten()
+    .map(line_width)
+    .max()
+    .unwrap_or(0)
+    .max(MIN_PROSE_WIDTH)
+    .min(inner_width);
+    startup.extend(startup_note(card, prose_width));
+
     let blocks = vec![
-        context_block(card),
-        startup_block(card, inner_width),
-        attributed_block(card, inner_width),
-        pending_block(card),
-        not_attributable_block(card, inner_width),
-        contributors_block(card, inner_width),
-        turns_block(card, inner_width),
-        warnings_block(card),
+        context,
+        startup,
+        attributed,
+        pending_block(card, prose_width),
+        not_attributable,
+        contributors,
+        turns,
+        warnings_block(card, prose_width),
     ];
     let mut lines: Vec<Line<'static>> = Vec::new();
     for block in blocks.into_iter().filter(|block| !block.is_empty()) {
@@ -144,16 +172,38 @@ fn context_block(card: &ContextCard) -> Vec<Line<'static>> {
     vec![spans.into()]
 }
 
-fn startup_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
+/// The prose under the startup rows: the measured input, or the unavailable notice.
+fn startup_note(card: &ContextCard, width: usize) -> Vec<Line<'static>> {
     match &card.startup {
-        Startup::Unavailable => {
-            vec!["Startup context unavailable for this session".dim().into()]
+        Startup::Unavailable => prose(
+            "Startup context unavailable for this session",
+            /*initial_indent*/ "",
+            /*subsequent_indent*/ "",
+            width,
+        ),
+        Startup::Available {
+            first_request_input,
+            ..
+        } => {
+            let measured = format_with_separators(*first_request_input);
+            prose(
+                &format!("measured: first request = {measured} input tokens"),
+                /*initial_indent*/ "  \u{21b3} ",
+                /*subsequent_indent*/ "    ",
+                width,
+            )
         }
+    }
+}
+
+fn startup_rows(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
+    match &card.startup {
+        Startup::Unavailable => Vec::new(),
         Startup::Available {
             total,
             instructions,
             baseline,
-            first_request_input,
+            ..
         } => {
             let labels = [
                 "Startup context",
@@ -186,12 +236,6 @@ fn startup_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
                     .into(),
                 );
             }
-            let measured = format_with_separators(*first_request_input);
-            lines.push(
-                format!("  \u{21b3} measured: first request = {measured} input tokens")
-                    .dim()
-                    .into(),
-            );
             lines
         }
     }
@@ -292,15 +336,16 @@ fn attributed_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>
 }
 
 /// Rendered whenever usage is stale, whether or not any category row exists.
-fn pending_block(card: &ContextCard) -> Vec<Line<'static>> {
+fn pending_block(card: &ContextCard, width: usize) -> Vec<Line<'static>> {
     if card.usage != Usage::Pending {
         return Vec::new();
     }
-    vec![
-        "Awaiting updated usage; run /ctx again after the response completes"
-            .dim()
-            .into(),
-    ]
+    prose(
+        "Awaiting updated usage; run /ctx again after the response completes",
+        /*initial_indent*/ "",
+        /*subsequent_indent*/ "",
+        width,
+    )
 }
 
 fn not_attributable_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
@@ -343,6 +388,7 @@ fn contributors_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'stati
     let share_width = if has_shares { GAP + SHARE_WIDTH } else { 0 };
     let fixed = 2 + 1 + GAP + category_width + GAP + GAP + number_width + share_width;
     let label_width = widest(card.contributors.iter().map(|entry| entry.label.as_str()))
+        .min(LABEL_CELLS)
         .min(label_budget(inner_width, fixed));
 
     let mut heading = vec!["Largest contributors".bold()];
@@ -451,23 +497,42 @@ fn turns_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn warnings_block(card: &ContextCard) -> Vec<Line<'static>> {
+fn warnings_block(card: &ContextCard, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     if card.warnings > 0 {
-        lines.push(
-            format!("{} items with classification warnings", card.warnings)
-                .dim()
-                .into(),
-        );
+        lines.extend(prose(
+            &format!("{} items with classification warnings", card.warnings),
+            /*initial_indent*/ "",
+            /*subsequent_indent*/ "",
+            width,
+        ));
     }
     if card.unsizable > 0 {
-        lines.push(
-            format!("{} items could not be sized", card.unsizable)
-                .dim()
-                .into(),
-        );
+        lines.extend(prose(
+            &format!("{} items could not be sized", card.unsizable),
+            /*initial_indent*/ "",
+            /*subsequent_indent*/ "",
+            width,
+        ));
     }
     lines
+}
+
+/// Dim prose wrapped to `width`, so a sentence never widens the card past its tables.
+fn prose(
+    text: &str,
+    initial_indent: &str,
+    subsequent_indent: &str,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let options = textwrap::Options::new(width.max(1))
+        .initial_indent(initial_indent)
+        .subsequent_indent(subsequent_indent)
+        .break_words(false);
+    textwrap::wrap(text, options)
+        .into_iter()
+        .map(|line| line.into_owned().dim().into())
+        .collect()
 }
 
 fn table_row(row: &Row, widths: &TableWidths, bar: Option<String>) -> Line<'static> {

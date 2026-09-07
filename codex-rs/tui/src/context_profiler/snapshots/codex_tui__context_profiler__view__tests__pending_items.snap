@@ -4,32 +4,33 @@ expression: "render(profiler.state(), 80)"
 ---
 /ctx
 
-╭─────────────────────────────────────────────────────────────────────╮
-│ Last reported context  23,000 / 272,000   96% remaining             │
-│                                                                     │
-│ Startup context                         ~19,982                     │
-│   instructions                             ~227                     │
-│   system + tools baseline (reconciled)  ~19,755                     │
-│   ↳ measured: first request = 20,000 input tokens                   │
-│                                                                     │
-│ Attributed to items                                                 │
-│   Agent messages  ~1,156                                            │
-│   Tool outputs      ~903                                            │
-│   Tool calls        ~573                                            │
-│   Instructions      ~227                                            │
-│   Reasoning          ~71                                            │
-│   User messages      ~34                                            │
-│ ────────────────────────                                            │
-│   total           ~2,964                                            │
-│                                                                     │
-│ Awaiting updated usage; run /ctx again after the response completes │
-│                                                                     │
-│ Largest contributors (estimated)                                    │
-│   1  Tool calls      read_file       ~1,373                         │
-│   2  Agent messages  assistant.text    ~756                         │
-│   3  Agent messages  assistant.text     400                         │
-│                                                                     │
-│ Last 2 turns   added  context                                       │
-│   2           +2,200   23,000                                       │
-│   1                —   20,800                                       │
-╰─────────────────────────────────────────────────────────────────────╯
+╭─────────────────────────────────────────────────────────╮
+│ Last reported context  23,000 / 272,000   96% remaining │
+│                                                         │
+│ Startup context                         ~19,982         │
+│   instructions                             ~227         │
+│   system + tools baseline (reconciled)  ~19,755         │
+│   ↳ measured: first request = 20,000 input tokens       │
+│                                                         │
+│ Attributed to items                                     │
+│   Agent messages  ~1,156                                │
+│   Tool outputs      ~903                                │
+│   Tool calls        ~573                                │
+│   Instructions      ~227                                │
+│   Reasoning          ~71                                │
+│   User messages      ~34                                │
+│ ────────────────────────                                │
+│   total           ~2,964                                │
+│                                                         │
+│ Awaiting updated usage; run /ctx again after the        │
+│ response completes                                      │
+│                                                         │
+│ Largest contributors (estimated)                        │
+│   1  Tool calls      read_file       ~1,373             │
+│   2  Agent messages  assistant.text    ~756             │
+│   3  Agent messages  assistant.text     400             │
+│                                                         │
+│ Last 2 turns   added  context                           │
+│   2           +2,200   23,000                           │
+│   1                —   20,800                           │
+╰─────────────────────────────────────────────────────────╯
