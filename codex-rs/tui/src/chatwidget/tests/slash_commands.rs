@@ -3041,6 +3041,15 @@ async fn slash_resume_opens_picker_while_mcp_startup_is_running() {
 }
 
 #[tokio::test]
+async fn slash_ctx_requests_the_context_profile_card() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command(SlashCommand::Ctx);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowContextProfile));
+}
+
+#[tokio::test]
 async fn slash_import_opens_claude_code_import_picker() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

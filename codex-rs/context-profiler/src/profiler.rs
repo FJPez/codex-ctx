@@ -16,7 +16,7 @@ use crate::item::ItemSummary;
 use crate::item::PricingKind;
 use crate::item::TokenCost;
 use crate::kind::call_id;
-use crate::kind::item_kind;
+use crate::kind::display_label;
 use crate::snapshot::InitialContextSummary;
 use crate::snapshot::ProfilerState;
 use crate::snapshot::TurnDelta;
@@ -112,12 +112,13 @@ impl ContextProfiler {
                     pricing: classification.pricing,
                     bytes: size.unwrap_or(0),
                     cost: TokenCost::Estimated(estimate),
-                    label: item_kind(item).to_string(),
+                    label: display_label(item, &classification.parts),
                     group,
                     item_id: item.id().map(ToString::to_string),
                     parts: classification.parts,
                     warnings: classification.warnings,
                 });
+                self.state.usage_pending = true;
                 self.rebuild_aggregates();
             }
             ProfilerEvent::Usage { turn_id, usage } => {
@@ -129,6 +130,7 @@ impl ContextProfiler {
                     });
                     return;
                 }
+                self.state.usage_pending = false;
                 let total = usage.reported_context_tokens;
                 self.attribute_span(&usage);
                 self.state.snapshot.reported_context_tokens = Some(total);
@@ -142,6 +144,7 @@ impl ContextProfiler {
             }
             ProfilerEvent::UsageMissing { turn_id } => {
                 self.ensure_open_turn(turn_id);
+                self.state.usage_pending = true;
                 self.baseline_pending = false;
                 self.last_anchor_total = None;
                 let items_seen = self.items_seen;

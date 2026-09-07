@@ -81,4 +81,6 @@ pub struct ProfilerState {
     pub classification_warning_count: u32,
     /// Items whose serialized size could not be computed; unreachable for today's types.
     pub unsizable_item_count: u32,
+    /// Items or a missing usage arrived after the last accepted anchor, so the reported total is stale.
+    pub usage_pending: bool,
 }

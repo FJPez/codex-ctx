@@ -1,0 +1,34 @@
+---
+source: tui/src/context_profiler/card_tests.rs
+expression: "render(profiler.state(), 80)"
+---
+/ctx
+
+╭───────────────────────────────────────────────────╮
+│ Context  23,000 / 272,000   96% remaining         │
+│                                                   │
+│ Startup context unavailable for this session      │
+│                                                   │
+│ Attributed to items share of context              │
+│   Agent messages     ~1,156    5%  ██████████████ │
+│   Tool outputs          800    3%  ████████       │
+│   Tool calls           ~573    2%  ██████         │
+│   Instructions         ~227    1%  ███            │
+│   Reasoning             ~71    0%                 │
+│   User messages         ~34    0%                 │
+│ ─────────────────────────────────                 │
+│   total              ~2,861                       │
+│                                                   │
+│   Not attributed    ~20,139   88%                 │
+│ ─────────────────────────────────                 │
+│   Reported context   23,000  100%                 │
+│                                                   │
+│ Largest contributors (estimated)                  │
+│   1  Tool calls      read_file       ~1,373    6% │
+│   2  Agent messages  assistant.text    ~756    3% │
+│   3  Agent messages  assistant.text     400    2% │
+│                                                   │
+│ Last 2 turns   added  context                     │
+│   2           +2,200   23,000                     │
+│   1                —   20,800                     │
+╰───────────────────────────────────────────────────╯

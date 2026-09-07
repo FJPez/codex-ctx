@@ -90,6 +90,9 @@ impl ChatWidget {
             self.sync_plugins_command_enabled();
             self.refresh_plugin_mentions();
         }
+        if feature == Feature::ContextProfiler {
+            self.sync_ctx_command_enabled();
+        }
         if feature == Feature::Goals {
             self.sync_goal_command_enabled();
             if !enabled {
@@ -319,6 +322,11 @@ impl ChatWidget {
     pub(super) fn sync_goal_command_enabled(&mut self) {
         self.bottom_pane
             .set_goal_command_enabled(self.config.features.enabled(Feature::Goals));
+    }
+
+    pub(super) fn sync_ctx_command_enabled(&mut self) {
+        self.bottom_pane
+            .set_ctx_command_enabled(self.config.features.enabled(Feature::ContextProfiler));
     }
 
     pub(super) fn sync_mentions_v2_enabled(&mut self) {

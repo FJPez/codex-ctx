@@ -61,6 +61,7 @@ pub(crate) struct BuiltinCommandFlags {
     pub(crate) token_activity_command_enabled: bool,
     pub(crate) service_tier_commands_enabled: bool,
     pub(crate) goal_command_enabled: bool,
+    pub(crate) ctx_command_enabled: bool,
     pub(crate) personality_command_enabled: bool,
     pub(crate) worktrees_enabled: bool,
     pub(crate) allow_elevate_sandbox: bool,
@@ -77,6 +78,7 @@ pub(crate) fn builtins_for_input(flags: BuiltinCommandFlags) -> Vec<(&'static st
         .filter(|(_, cmd)| flags.plugins_command_enabled || *cmd != SlashCommand::Plugins)
         .filter(|(_, cmd)| flags.token_activity_command_enabled || *cmd != SlashCommand::Usage)
         .filter(|(_, cmd)| flags.goal_command_enabled || *cmd != SlashCommand::Goal)
+        .filter(|(_, cmd)| flags.ctx_command_enabled || *cmd != SlashCommand::Ctx)
         .filter(|(_, cmd)| flags.worktrees_enabled || *cmd != SlashCommand::Worktree)
         .filter(|(_, cmd)| flags.personality_command_enabled || *cmd != SlashCommand::Personality)
         .filter(|(_, cmd)| !flags.side_conversation_active || cmd.available_in_side_conversation())
@@ -172,6 +174,7 @@ mod tests {
             token_activity_command_enabled: true,
             service_tier_commands_enabled: true,
             goal_command_enabled: true,
+            ctx_command_enabled: true,
             personality_command_enabled: true,
             worktrees_enabled: true,
             allow_elevate_sandbox: true,
@@ -280,6 +283,24 @@ mod tests {
         let mut flags = all_enabled_flags();
         flags.goal_command_enabled = false;
         assert_eq!(find_builtin_command("goal", flags), None);
+    }
+
+    #[test]
+    fn ctx_command_is_listed_only_when_enabled() {
+        let mut flags = all_enabled_flags();
+        flags.ctx_command_enabled = false;
+        assert_eq!(
+            builtins_for_input(flags)
+                .into_iter()
+                .find(|(_, command)| *command == SlashCommand::Ctx),
+            None
+        );
+        assert_eq!(
+            builtins_for_input(all_enabled_flags())
+                .into_iter()
+                .find(|(_, command)| *command == SlashCommand::Ctx),
+            Some(("ctx", SlashCommand::Ctx))
+        );
     }
 
     #[test]

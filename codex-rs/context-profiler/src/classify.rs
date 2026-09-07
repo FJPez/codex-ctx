@@ -27,7 +27,7 @@ use crate::item::PartMedia;
 use crate::item::PricingKind;
 
 /// The kind core stamps when it has no classification for an entry.
-const UNKNOWN_KIND: &str = "unknown";
+pub(crate) const UNKNOWN_KIND: &str = "unknown";
 
 /// Kinds whose display category is not the default instruction one.
 const USER_KIND_PREFIX: &str = "user.";

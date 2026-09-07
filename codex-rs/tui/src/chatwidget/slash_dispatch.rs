@@ -492,6 +492,9 @@ impl ChatWidget {
                     );
                 }
             }
+            SlashCommand::Ctx => {
+                self.app_event_tx.send(AppEvent::ShowContextProfile);
+            }
             SlashCommand::Cd => {
                 self.dispatch_command_with_args(SlashCommand::Cd, "~".to_string(), Vec::new());
             }
@@ -1142,6 +1145,7 @@ impl ChatWidget {
             plugins_command_enabled: self.config.features.enabled(Feature::Plugins),
             token_activity_command_enabled: self.has_codex_backend_auth,
             goal_command_enabled: self.config.features.enabled(Feature::Goals),
+            ctx_command_enabled: self.config.features.enabled(Feature::ContextProfiler),
             service_tier_commands_enabled: self.fast_mode_enabled(),
             personality_command_enabled: self.config.features.enabled(Feature::Personality),
             worktrees_enabled: self.config.features.enabled(Feature::Worktrees)
@@ -1166,6 +1170,7 @@ impl ChatWidget {
         match cmd {
             SlashCommand::Ide
             | SlashCommand::Status
+            | SlashCommand::Ctx
             | SlashCommand::Pwd
             | SlashCommand::Usage
             | SlashCommand::DebugConfig

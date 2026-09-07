@@ -48,6 +48,32 @@ fn custom_tool_call(call_id: &str) -> ResponseItem {
     }
 }
 
+fn function_call(name: &str, call_id: &str) -> ResponseItem {
+    ResponseItem::FunctionCall {
+        id: None,
+        name: name.to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        encrypted_function_args: None,
+        call_id: call_id.to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn function_call_output(call_id: &str) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some(call_id.to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text("ok".to_string()),
+            success: Some(true),
+        },
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 fn custom_tool_call_output(call_id: &str) -> ResponseItem {
     sized_tool_output(call_id, 2)
 }
@@ -102,6 +128,19 @@ fn instruction_message(kind: &str, text: &str) -> ResponseItem {
         }],
         phase: None,
         internal_chat_message_metadata_passthrough: kinds(kind),
+    }
+}
+
+/// A message that reached us without `content_item_kinds`, so it has no kind to be named by.
+fn untagged_user_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -191,7 +230,7 @@ fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> I
         pricing: classification.pricing,
         bytes: item_bytes(item),
         cost: item_cost(item),
-        label: item_kind(item).to_string(),
+        label: display_label(item, &classification.parts),
         group,
         item_id: None,
         parts: classification.parts,
@@ -266,6 +305,7 @@ fn single_turn_folds_items_anchor_and_turn_delta() {
         invalidated: None,
         classification_warning_count: 0,
         unsizable_item_count: 0,
+        usage_pending: false,
     };
     assert_eq!(&expected, profiler.state());
 }
@@ -303,7 +343,7 @@ fn call_and_output_share_one_group_across_turns() {
             key: GroupKey::ToolCall("call_1".to_string()),
             category: Category::ToolCall,
             cost: TokenCost::Estimated(item_cost(&call).tokens() + item_cost(&output).tokens()),
-            label: "CustomToolCall".to_string(),
+            label: "shell".to_string(),
             members: vec![1, 3],
         },
         group_of(&summary(2, 1, &filler, GroupKey::Ungrouped(2))),
@@ -1041,4 +1081,91 @@ fn an_image_takes_an_estimate_weighted_share_not_a_byte_weighted_one() {
         )
     );
     assert!(image_share * 2 < image_share_by_bytes && image_share * 2 < 3_000);
+}
+
+#[test]
+fn groups_are_labelled_by_tool_name_or_content_kind() {
+    let call = function_call("read_file", "call_1");
+    let output = function_call_output("call_1");
+    let reasoning = reasoning_item();
+    let instructions = merged_instruction_message(&[
+        ("agents_md.instructions", "be brief"),
+        ("environments.environment_context", &"cwd ".repeat(40)),
+    ]);
+    let untagged = untagged_user_message("hi");
+
+    let mut profiler = profiler();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(
+        &mut profiler,
+        TURN,
+        &[&call, &output, &reasoning, &instructions, &untagged],
+    );
+
+    let labels: Vec<&str> = profiler
+        .state()
+        .snapshot
+        .groups
+        .iter()
+        .map(|group| group.label.as_str())
+        .collect();
+    assert_eq!(
+        vec![
+            "read_file",
+            "Reasoning",
+            "environments.environment_context +1",
+            "Message"
+        ],
+        labels
+    );
+}
+
+/// Several fragments merged into one message, each entry carrying its own kind.
+fn merged_instruction_message(fragments: &[(&str, &str)]) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: fragments
+            .iter()
+            .map(|(_, text)| ContentItem::InputText {
+                text: text.to_string(),
+            })
+            .collect(),
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(
+                fragments
+                    .iter()
+                    .map(|(kind, _)| ContentItemKind(kind.to_string()))
+                    .collect(),
+            ),
+            ..Default::default()
+        }),
+    }
+}
+
+#[test]
+fn usage_is_pending_until_the_next_accepted_anchor() {
+    let item = message_item("first");
+
+    let mut profiler = profiler();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(&mut profiler, TURN, &[&item]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(100, /*items_seq*/ 1),
+    });
+    assert!(!profiler.state().usage_pending);
+
+    profiler.observe(ProfilerEvent::UsageMissing { turn_id: TURN });
+    assert!(profiler.state().usage_pending);
+
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(100, /*items_seq*/ 1),
+    });
+    assert!(!profiler.state().usage_pending);
+
+    observe_items(&mut profiler, TURN, &[&item]);
+    assert!(profiler.state().usage_pending);
 }

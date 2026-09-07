@@ -1,0 +1,9 @@
+---
+source: tui/src/context_profiler/card_tests.rs
+expression: "render(profiler.state(), 80)"
+---
+/ctx
+
+╭───────────────────────────────────────────────────╮
+│ Context profiler has no data for this thread yet. │
+╰───────────────────────────────────────────────────╯

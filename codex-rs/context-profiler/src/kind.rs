@@ -2,6 +2,9 @@
 
 use codex_protocol::models::ResponseItem;
 
+use crate::classify::UNKNOWN_KIND;
+use crate::item::ContentPart;
+
 /// Exhaustive so a new upstream `ResponseItem` variant fails the build.
 pub fn item_kind(item: &ResponseItem) -> &'static str {
     match item {
@@ -24,6 +27,50 @@ pub fn item_kind(item: &ResponseItem) -> &'static str {
         ResponseItem::ContextCompaction { .. } => "ContextCompaction",
         ResponseItem::Other => "Other",
     }
+}
+
+/// The name a tool call is known by, falling back to the variant name for everything else.
+pub(crate) fn item_label(item: &ResponseItem) -> &str {
+    match item {
+        ResponseItem::FunctionCall { name, .. } | ResponseItem::CustomToolCall { name, .. } => name,
+        ResponseItem::LocalShellCall { .. } => "shell",
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::Message { .. }
+        | ResponseItem::AgentMessage { .. }
+        | ResponseItem::Reasoning { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ConfigurationUpdate { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => item_kind(item),
+    }
+}
+
+/// The name shown for an item. A message is named by the kind core stamped on its content
+/// entries: the kind itself when every entry shares it, otherwise the largest entry's kind with
+/// `+N` for the others. Largest by bytes is a label representative, not the largest token cost.
+pub(crate) fn display_label(item: &ResponseItem, parts: &[ContentPart]) -> String {
+    let fallback = || item_label(item).to_string();
+    if !matches!(item, ResponseItem::Message { .. }) {
+        return fallback();
+    }
+    let Some(largest) = parts.iter().max_by_key(|part| part.bytes) else {
+        return fallback();
+    };
+    let kind = largest.kind.as_str();
+    if kind.is_empty() || kind == UNKNOWN_KIND {
+        return fallback();
+    }
+    if parts.iter().all(|part| part.kind == kind) {
+        return kind.to_string();
+    }
+    format!("{kind} +{}", parts.len() - 1)
 }
 
 /// The id that pairs a tool call with its output; core pairs them globally, not per turn.
