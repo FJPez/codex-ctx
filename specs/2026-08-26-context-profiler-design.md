@@ -1158,6 +1158,16 @@ reasons (dropped events, compacted), no data, a 40-column terminal, and an over-
 label. Unit tests on `ContextCard` assert concrete share percentages, so the accounting is pinned
 independently of the rendering.
 
+### Known limitation: resumed and forked sessions
+
+`thread/resume` and `thread/fork` carry no `experimental_raw_events` field, so the app-server
+subscribes those threads without the raw item and usage stream. Their profiler attaches
+`MidStream`, sees no items and no anchors, and `/ctx` renders the no-data card, which is correct
+for what it observed. Found in the M4 live check. Fix on its own branch after M4: add the field
+to both request types (serde default `false`), thread it through the resume and fork handlers
+to the same subscription call `thread/start` uses, and set it in the TUI's resume and fork param
+builders.
+
 ### After dogfood (M6)
 
 - Argument summaries in contributor labels, so a row reads `shell  cargo test -p codex-core`
