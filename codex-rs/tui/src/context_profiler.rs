@@ -2,8 +2,8 @@
 //!
 //! One `ThreadProfilerAdapter` per thread turns the notification stream into
 //! `ProfilerEvent`s, which are folded into that thread's `ContextProfiler` and
-//! mirrored into a JSONL trace. The trace is best effort: any failure to open or
-//! write it drops the trace only, never the profiling.
+//! then mirrored into a JSONL trace. The trace is downstream of the fold and best
+//! effort: any failure to open or write it drops the trace only, never the profiling.
 
 mod adapter;
 mod log;

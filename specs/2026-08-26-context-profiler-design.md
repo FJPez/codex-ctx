@@ -412,11 +412,13 @@ once and drops the writer - the session is never degraded to protect a trace.
 `specs/tools/analyse_capture.py` reads this format directly, tolerating a malformed final line
 only (an interrupted write; anything earlier is corruption and fails loudly).
 
-**The trace is derived off the primary path, never on it.** The adapter's job is to yield a
-`ProfilerEvent`; the registry folds that event first and only then, if a writer exists, writes the
-redacted record. A trace that cannot be opened or written therefore never disables profiling - the
-worst case is a missing file. It is retained through M6 and reconsidered after dogfooding, against
-one question: did it diagnose anything.
+**The trace is downstream of the profiler fold and failure-independent.** The adapter's job is to
+yield a `ProfilerEvent`; the registry folds that event first and only then, if a writer exists,
+writes the redacted record. A trace that cannot be opened or written therefore never disables
+profiling - the worst case is a missing file. The write itself is still synchronous inside
+`observe`; a background writer is not worth its machinery until a slow write is ever observed. The
+trace is retained through M6 and reconsidered after dogfooding, against one question: did it
+diagnose anything.
 
 `items_seq` counts observed raw items only - it is never a server context size. Hidden context
 (base instructions, tool schemas) is request scaffolding *beside* the item list, not a set of
