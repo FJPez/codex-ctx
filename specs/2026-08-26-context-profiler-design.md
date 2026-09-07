@@ -170,7 +170,10 @@ tui/src/context_profiler/mod.rs        adapter: unwrap + route by thread_id
 codex-context-profiler                 attribution + reconciliation
    │  ContextSnapshot
    ▼
-tui/src/context_profiler/view.rs       rendering only, no arithmetic
+tui/src/context_profiler/card.rs       ContextSnapshot -> ContextCard (all accounting)
+   │  ContextCard
+   ▼
+tui/src/context_profiler/view.rs       rendering only, no token accounting
 ```
 
 ```
@@ -184,7 +187,8 @@ codex-rs/context-profiler/             new crate; codex-protocol + utility crate
 
 codex-rs/tui/src/context_profiler/
   mod.rs                               ServerNotification -> ProfilerEvent
-  view.rs                              ContextSnapshot -> ratatui
+  card.rs                              ContextSnapshot -> ContextCard
+  view.rs                              ContextCard -> ratatui
 ```
 
 ### Decisions
@@ -759,12 +763,12 @@ alternatives in findings §9.
 (`tui/src/token_usage.rs:9`), not a context-profiling concept, and duplicating it inside a crate we
 deliberately kept at the `codex-protocol` layer would leak exactly the boundary we drew. The
 profiler exposes `reported_context_tokens`, `window`, and the attributed/residual composition; the
-TUI computes both percentages with its own helper.
+TUI computes every percentage with its own helper.
 
-The TUI turns `baseline_tokens` into percentages using its own
-`percent_of_context_window_remaining`, once with `BASELINE_TOKENS` and once with
-`snapshot.baseline_tokens`. Those two computations live in the TUI's profiler module, not in
-`view.rs`, which stays free of arithmetic.
+M4 ships one header percent, from the status bar's own `percent_of_window_remaining`
+(`tui/src/token_usage.rs`), so the two surfaces agree by construction; the second computation, over
+`snapshot.baseline_tokens` instead of `BASELINE_TOKENS`, is deferred to M6. All of it lives in the
+TUI's profiler module (`card.rs`), not in `view.rs`, which is free of token accounting.
 
 Note "reconciled", not "measured". We never observe the baseline directly; we infer it as a
 residual. Spike B identified *what* it consists of (tool schemas plus base system prompt), but the
@@ -1014,64 +1018,95 @@ the decomposition has plenty of data.
 
 ## View
 
-**Surface:** inline history cell in M4, matching `/status`
-(`tui/src/status/card.rs` builds a `CompositeHistoryCell`). Each `/ctx` is a frozen snapshot in
-scrollback, which gives a manual timeline for free. A full-screen pager overlay
-(`Overlay::new_static_with_renderables`, `tui/src/pager_overlay.rs:73`) follows later for the
-complete item list.
+**Surface:** inline history cell, matching `/status` (`tui/src/status/card.rs` builds a
+`CompositeHistoryCell`). `/ctx` renders a magenta command line followed by a bordered card. Each
+card is a frozen snapshot computed at insertion and never recomputed - only layout depends on
+terminal width - so scrollback gives a manual timeline for free. Shipped without a pager, a copy
+handle, or a provenance marker. The command appears in the slash popup only under
+`Feature::ContextProfiler`, works while a task is running, and is unavailable in side
+conversations.
+
+**Data path.** The widget emits `AppEvent::ShowContextProfile`. `App` reads
+`ProfilerRegistry::state` for the displayed thread, builds a plain-data `ContextCard`
+(`tui/src/context_profiler/card.rs` - all token accounting and percentages), and renders it
+(`tui/src/context_profiler/view.rs` - layout arithmetic only: column widths, padding, bar lengths).
 
 ```
-/ctx                                                    ● live
+/ctx
 
-  Context      84,210 / 272,000            72% remaining
-
-  Startup context (before turn 1)         ~25,150
-    instructions (AGENTS.md, skills, …)   ~13,430
-    system + tools baseline (reconciled)  ~11,720
-    ↳ measured: first request = 25,230 input tokens
-
-  Attributed to items                    share of context
-    Tool outputs             ~44,600   53%  ██████████████
-    Instructions             ~13,430   16%  ████
-    Agent messages            ~8,940   11%  ███
-    Reasoning                 ~2,400    3%  █
-    User messages             ~1,120    1%  ▍
-                             ───────
-                             ~70,490   84%
-
-  Not attributable
-    System + tools baseline  ~11,720   14%  ████
-    Reconciliation drift       2,000    2%   ±2.8%
-  ──────────────────────────────────────────────────────
-  Explained                   84,210  100%
-
-  Largest contributors (estimated)
-   1  shell   cargo test -p codex-core       ~18,400   22%
-   2  read    core/src/session/turn.rs       ~11,200   13%
-   3  instr   skills_instructions             ~7,190    9%
-
-  Last 5 turns                       added    context
-   16  "check the trace format"      +19,880    84,210
-   15  "does resume replay…"              —    64,330   ↳ compaction
+╭──────────────────────────────────────────────────────────╮
+│ Context  23,000 / 272,000   96% remaining                │
+│                                                          │
+│ Startup context                         ~19,982          │
+│   instructions                             ~227          │
+│   system + tools baseline (reconciled)  ~19,755          │
+│   ↳ measured: first request = 20,000 input tokens        │
+│                                                          │
+│ Attributed to items     share of context                 │
+│   Agent messages            ~1,156    5%  ██████████████ │
+│   Tool outputs                 800    3%  ████████       │
+│   Tool calls                  ~573    2%  ██████         │
+│   Instructions                ~227    1%  ███            │
+│   Reasoning                    ~71    0%                 │
+│   User messages                ~34    0%                 │
+│ ──────────────────────────────────                       │
+│   total                     ~2,861                       │
+│                                                          │
+│   System + tools baseline  ~19,755   86%                 │
+│   Reconciliation drift        ~384    2%                 │
+│ ──────────────────────────────────                       │
+│   Reported context          23,000  100%                 │
+│                                                          │
+│ Largest contributors (estimated)                         │
+│   1  Tool calls      read_file  ~1,373    6%             │
+│   2  Agent messages  Message      ~756    3%             │
+│   3  Agent messages  Message       400    2%             │
+│                                                          │
+│ Last 2 turns   added  context                            │
+│   2           +2,200   23,000                            │
+│   1                —   20,800                            │
+╰──────────────────────────────────────────────────────────╯
 ```
 
-Illustrative figures, but the startup block uses the **real capture**: 25,230 measured input
-tokens, minus ~78 for the user's prompt, decomposed as ~13,430 observed instructions plus ~11,720
-reconciled hidden baseline. Tildes mark estimated values; untilded numbers are measured or
-summed from measured ones.
+The card above is the accepted snapshot at width 80. Its figures are synthetic test numbers; the
+fixture's instruction items are tiny, which is why the baseline dominates. Tildes mark estimated
+values; untilded numbers are measured or summed from measured ones.
+
+**The header carries one percent, not two.** It is percent of window remaining, computed with the
+same `percent_of_window_remaining` helper the status bar uses (`tui/src/token_usage.rs`), so the
+two surfaces cannot disagree. Comparing that against a reconciled-baseline percentage is deferred;
+see below.
 
 **Three denominators appear on this screen and they must stay visually distinct.** The header is
 percent of window *remaining* (reconciling to the status bar). The breakdown's share column is
-percent of *current context* - the "what is it made of" question - which is why it carries its own
-`share of context` heading rather than a bare `%`. Turn deltas are absolute tokens.
+percent of *current context* - `reported_context_tokens`, the "what is it made of" question -
+which is why it carries its own `share of context` heading rather than a bare `%`. Turn deltas are
+absolute tokens.
 
-**Attributed and explained are different totals.** Items sum to 70,490; the baseline is by
-definition what we *cannot* attribute to any item, so folding it into an "attributed" line would
-be self-contradictory. The split is the product's central distinction made visible: what we can
-name, versus what we can only reconcile.
+Share rules follow from that: a row rounding to 0% draws no bar, a negative value gets no share at
+all, and shares are never clamped to 100% - a frozen baseline can exceed a total that has since
+shrunk, and hiding that would hide a real disagreement.
+
+**The footer is the reported total, and the rows above it split into two kinds.** Items sum to
+`total`; the baseline is by definition what we *cannot* attribute to any item, so folding it into
+that sum would be self-contradictory. With a baseline the rows are the categories, then the
+reconciled baseline and the signed drift, then `Reported context N 100%`. Without a baseline the
+rows are the categories and a single `Not attributed` remainder of reported minus attributed. When
+usage is current, the displayed attributed and not-attributable rows sum to the footer. That split
+is the product's central distinction made visible: what we can name, versus what we can only
+reconcile.
 
 A turn with no prior anchor (first of an epoch, or first after a compaction seals one) renders
 `—` in the added column, never `0`. Zero would read as "this turn added nothing".
+
+Turn rows carry the turn number, the measured tokens added, and the context after - no prompt
+text, because the profiler does not carry any. Contributor labels are tool names (`read_file`,
+`shell`) from the crate's `item_label`; items with no tool name show their kind.
+
+**The startup block is headed "Startup context"**, not "before turn 1": the turn framing invited
+the reading that the number is a fixed floor. Only the first-request input is measured, so the
+other three figures carry tildes. When no baseline was established the whole block collapses to
+one dim line, `Startup context unavailable for this session`.
 
 **The headline is startup context, and it is a snapshot, not an invariant.** Calling it "fixed
 overhead" would be wrong: `build_prompt` takes `tools` from
@@ -1087,28 +1122,54 @@ derived *from* `first_request_input_tokens`, so the parts sum to a measured whol
 and the headline cannot exceed what was actually sent. A superseded draft violated this; see
 findings §9 and the process note.
 
-Reconciled baselines in a default configuration come out near 11,700, so the two percentages agree
-to within a point and putting them side by side would look like a bug for no benefit. The view
-surfaces the comparison **only when they diverge materially** - which happens on small windows (the
-denominator moves from 20,000 to 6,700 at a 32k window) or heavy tool/skill configurations.
+**Pending usage.** `ProfilerState.usage_pending` is set by an item observed after the last accepted
+anchor, or by a `UsageMissing`, and cleared by the next accepted anchor. While it is set the card
+knows its total is stale: the header reads `Last reported context`, the share column, the
+not-attributable rows and the footer are all hidden, and a dim line says `Awaiting updated usage;
+run /ctx again after the response completes`. The startup block and completed turn rows are
+unaffected by staleness, so they stay.
 
-When `completeness` is not `Complete`, the breakdown is replaced, never annotated:
+Before any anchor there is no total at all and the header omits it. A reported total of zero is
+displayed, but with percentages and the `100%` footer suppressed, since every share would be a
+division by zero.
+
+When `ProfilerState.invalidated` is set, the body is replaced, never annotated:
 
 ```
   ⚠ Context breakdown incomplete
     3 app-server events were dropped.
-    Codex context: 71% remaining.
-    Attribution unavailable until the session is replayed from its rollout.
+    Attribution unavailable for the rest of this session.
+    See /status for current usage.
 ```
+
+One line per reason - dropped events with their count, compaction, an incomplete item stream - and
+no totals or percentages, because the frozen total describes nothing current. With no profiler
+data for the thread at all the card is a single line, `Context profiler has no data for this thread
+yet.`
 
 The verified, actionable claim is the top block: *this much of your window is spent before your
 prompt does anything, and here is what it is.*
 
-**Degraded state** when raw events are unavailable: show Codex's own number, explain the gap,
-never render a partial breakdown.
-
 **Provenance** is an M7 concern. The MVP profiles live sessions only, so the header carries no
 source marker.
+
+**Tests.** `insta` snapshots cover the normal card, no baseline, pending items, both invalidation
+reasons (dropped events, compacted), no data, a 40-column terminal, and an over-long contributor
+label. Unit tests on `ContextCard` assert concrete share percentages, so the accounting is pinned
+independently of the rendering.
+
+### After dogfood (M6)
+
+- Argument summaries in contributor labels, so a row reads `shell  cargo test -p codex-core`
+  rather than `shell`. Needs the profiler to carry a summarized argument string.
+- The reconciled-vs-fixed percent comparison. Reconciled baselines in a default configuration come
+  out near 11,700, so the two percentages agree to within a point and showing both would look like
+  a bug. Surface it only where they diverge materially: small windows (the denominator moves from
+  20,000 to 6,700 at a 32k window) and heavy tool or skill configurations.
+- The full-item pager overlay (`Overlay::new_static_with_renderables`,
+  `tui/src/pager_overlay.rs:73`), which the snapshot's complete lists already allow as a pure view
+  addition.
+- Copy-to-clipboard, as `/status` has.
 
 ## Testing
 
@@ -1258,8 +1319,8 @@ plaintext (`rollout-trace/README.md:3-8`).
 |---|---|---|
 | M0 | Build and run the fork with a tool-call turn | **Done** |
 | M1 | Answer one question. No crate, no production code. See below. | **Done** |
-| M2 | The crate, in four reviewed stages - see below | Next |
-| M3 | Reconciliation: continuous re-solve, baseline/drift, `InitialContextSummary` | |
+| M2 | The crate, in four reviewed stages - see below | **Done** |
+| M3 | Reconciliation: baseline at the first eligible anchor, latest-only drift, `InitialContextSummary` | **Done** |
 | M4 | `/ctx` inline card + `insta` coverage | |
 | M5 | Epochs and compaction: sealing, before/after, turns spanning a boundary, compaction-kind inference; surface core's `context_window_id` and `window_number` on the raw completed event | |
 | M6 | Dogfood on real work; validate attribution; find out which views are actually used; reconsider the JSONL trace after dogfooding | |
