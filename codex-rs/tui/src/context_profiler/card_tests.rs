@@ -395,6 +395,10 @@ fn without_a_baseline_the_remainder_is_reported_minus_attributed() {
 
 #[test]
 fn long_contributor_label() {
-    let profiler = session(ObservationStart::SessionStart, &"n".repeat(70));
+    // The bundle marker survives the cap; only the descriptive part is shortened.
+    let profiler = session(
+        ObservationStart::SessionStart,
+        &format!("{} +2", "n".repeat(70)),
+    );
     insta::assert_snapshot!(render(profiler.state(), 80));
 }

@@ -417,7 +417,7 @@ fn contributor_row(
     label_width: usize,
     number_width: usize,
 ) -> Line<'static> {
-    let label = shorten(&entry.label, label_width);
+    let label = shorten_label(&entry.label, label_width);
     let mut spans = vec![
         Span::from(format!("  {}  ", entry.rank)),
         Span::from(entry.category.to_string()).dim(),
@@ -612,6 +612,21 @@ fn shorten(text: &str, width: usize) -> String {
         .iter()
         .map(|span| span.content.as_ref())
         .collect()
+}
+
+/// Shortens the descriptive part of a label but keeps a trailing ` +N` bundle marker.
+fn shorten_label(label: &str, width: usize) -> String {
+    let suffix = label
+        .rsplit_once(" +")
+        .filter(|(head, count)| !head.is_empty() && count.chars().all(|c| c.is_ascii_digit()))
+        .map(|(_, count)| format!(" +{count}"));
+    match suffix {
+        Some(suffix) if display_width(label) > width && width > suffix.len() + 1 => {
+            let head = &label[..label.len() - suffix.len()];
+            format!("{}{suffix}", shorten(head, width - suffix.len()))
+        }
+        _ => shorten(label, width),
+    }
 }
 
 /// Trailing padding that brings `text` up to `width`.
