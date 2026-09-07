@@ -52,18 +52,25 @@ pub(crate) fn item_label(item: &ResponseItem) -> &str {
     }
 }
 
-/// The name shown for an item. A message is named by the kind core stamped on its first content
-/// entry, which distinguishes injected fragments from what the user actually typed.
+/// The name shown for an item. A message is named by the kind core stamped on its content
+/// entries: the kind itself when every entry shares it, otherwise the largest entry's kind with
+/// `+N` for the others. Largest by bytes is a label representative, not the largest token cost.
 pub(crate) fn display_label(item: &ResponseItem, parts: &[ContentPart]) -> String {
-    match item {
-        ResponseItem::Message { .. } => parts
-            .first()
-            .map(|part| part.kind.as_str())
-            .filter(|kind| !kind.is_empty() && *kind != UNKNOWN_KIND)
-            .unwrap_or_else(|| item_label(item))
-            .to_string(),
-        _ => item_label(item).to_string(),
+    let fallback = || item_label(item).to_string();
+    if !matches!(item, ResponseItem::Message { .. }) {
+        return fallback();
     }
+    let Some(largest) = parts.iter().max_by_key(|part| part.bytes) else {
+        return fallback();
+    };
+    let kind = largest.kind.as_str();
+    if kind.is_empty() || kind == UNKNOWN_KIND {
+        return fallback();
+    }
+    if parts.iter().all(|part| part.kind == kind) {
+        return kind.to_string();
+    }
+    format!("{kind} +{}", parts.len() - 1)
 }
 
 /// The id that pairs a tool call with its output; core pairs them globally, not per turn.

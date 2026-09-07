@@ -1088,7 +1088,10 @@ fn groups_are_labelled_by_tool_name_or_content_kind() {
     let call = function_call("read_file", "call_1");
     let output = function_call_output("call_1");
     let reasoning = reasoning_item();
-    let instructions = instruction_message("agents_md.instructions", "be brief");
+    let instructions = merged_instruction_message(&[
+        ("agents_md.instructions", "be brief"),
+        ("environments.environment_context", &"cwd ".repeat(40)),
+    ]);
     let untagged = untagged_user_message("hi");
 
     let mut profiler = profiler();
@@ -1110,11 +1113,35 @@ fn groups_are_labelled_by_tool_name_or_content_kind() {
         vec![
             "read_file",
             "Reasoning",
-            "agents_md.instructions",
+            "environments.environment_context +1",
             "Message"
         ],
         labels
     );
+}
+
+/// Several fragments merged into one message, each entry carrying its own kind.
+fn merged_instruction_message(fragments: &[(&str, &str)]) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: fragments
+            .iter()
+            .map(|(_, text)| ContentItem::InputText {
+                text: text.to_string(),
+            })
+            .collect(),
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(
+                fragments
+                    .iter()
+                    .map(|(kind, _)| ContentItemKind(kind.to_string()))
+                    .collect(),
+            ),
+            ..Default::default()
+        }),
+    }
 }
 
 #[test]
