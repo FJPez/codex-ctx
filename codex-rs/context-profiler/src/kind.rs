@@ -26,6 +26,29 @@ pub fn item_kind(item: &ResponseItem) -> &'static str {
     }
 }
 
+/// The name a tool call is known by, falling back to the variant name for everything else.
+pub(crate) fn item_label(item: &ResponseItem) -> &str {
+    match item {
+        ResponseItem::FunctionCall { name, .. } | ResponseItem::CustomToolCall { name, .. } => name,
+        ResponseItem::LocalShellCall { .. } => "shell",
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::Message { .. }
+        | ResponseItem::AgentMessage { .. }
+        | ResponseItem::Reasoning { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ConfigurationUpdate { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => item_kind(item),
+    }
+}
+
 /// The id that pairs a tool call with its output; core pairs them globally, not per turn.
 pub fn call_id(item: &ResponseItem) -> Option<String> {
     match item {

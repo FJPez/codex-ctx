@@ -48,6 +48,32 @@ fn custom_tool_call(call_id: &str) -> ResponseItem {
     }
 }
 
+fn function_call(name: &str, call_id: &str) -> ResponseItem {
+    ResponseItem::FunctionCall {
+        id: None,
+        name: name.to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        encrypted_function_args: None,
+        call_id: call_id.to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn function_call_output(call_id: &str) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some(call_id.to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text("ok".to_string()),
+            success: Some(true),
+        },
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 fn custom_tool_call_output(call_id: &str) -> ResponseItem {
     sized_tool_output(call_id, 2)
 }
@@ -191,7 +217,7 @@ fn summary(seq: u64, turn_index: u32, item: &ResponseItem, group: GroupKey) -> I
         pricing: classification.pricing,
         bytes: item_bytes(item),
         cost: item_cost(item),
-        label: item_kind(item).to_string(),
+        label: item_label(item).to_string(),
         group,
         item_id: None,
         parts: classification.parts,
@@ -266,6 +292,7 @@ fn single_turn_folds_items_anchor_and_turn_delta() {
         invalidated: None,
         classification_warning_count: 0,
         unsizable_item_count: 0,
+        usage_pending: false,
     };
     assert_eq!(&expected, profiler.state());
 }
@@ -303,7 +330,7 @@ fn call_and_output_share_one_group_across_turns() {
             key: GroupKey::ToolCall("call_1".to_string()),
             category: Category::ToolCall,
             cost: TokenCost::Estimated(item_cost(&call).tokens() + item_cost(&output).tokens()),
-            label: "CustomToolCall".to_string(),
+            label: "shell".to_string(),
             members: vec![1, 3],
         },
         group_of(&summary(2, 1, &filler, GroupKey::Ungrouped(2))),
@@ -1041,4 +1068,50 @@ fn an_image_takes_an_estimate_weighted_share_not_a_byte_weighted_one() {
         )
     );
     assert!(image_share * 2 < image_share_by_bytes && image_share * 2 < 3_000);
+}
+
+#[test]
+fn tool_call_groups_are_labelled_by_tool_name() {
+    let call = function_call("read_file", "call_1");
+    let output = function_call_output("call_1");
+    let reasoning = reasoning_item();
+
+    let mut profiler = profiler();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(&mut profiler, TURN, &[&call, &output, &reasoning]);
+
+    let labels: Vec<&str> = profiler
+        .state()
+        .snapshot
+        .groups
+        .iter()
+        .map(|group| group.label.as_str())
+        .collect();
+    assert_eq!(vec!["read_file", "Reasoning"], labels);
+}
+
+#[test]
+fn usage_is_pending_until_the_next_accepted_anchor() {
+    let item = message_item("first");
+
+    let mut profiler = profiler();
+    profiler.observe(ProfilerEvent::TurnStarted { turn_id: TURN });
+    observe_items(&mut profiler, TURN, &[&item]);
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(100, /*items_seq*/ 1),
+    });
+    assert!(!profiler.state().usage_pending);
+
+    profiler.observe(ProfilerEvent::UsageMissing { turn_id: TURN });
+    assert!(profiler.state().usage_pending);
+
+    profiler.observe(ProfilerEvent::Usage {
+        turn_id: TURN,
+        usage: usage(100, /*items_seq*/ 1),
+    });
+    assert!(!profiler.state().usage_pending);
+
+    observe_items(&mut profiler, TURN, &[&item]);
+    assert!(profiler.state().usage_pending);
 }
