@@ -162,7 +162,7 @@ pub struct GuardianAuthorizationVersion {
     pub user_message_revision: u64,
     /// Successful host answers captured by the temporary legacy path.
     pub user_input_response_count: usize,
-    /// False when required retained answers were lost or do not fit the request budget.
+    /// False when required retained answers or root instructions are unavailable.
     pub retained_context_complete: bool,
 }
 
@@ -837,6 +837,13 @@ impl CodexThread {
     /// Refresh MCP configuration and managed requirements without reloading unrelated settings.
     pub async fn refresh_mcp_config(&self, next_config: crate::config::Config) {
         self.session.refresh_mcp_config(next_config).await;
+    }
+
+    /// Refreshes this thread's Apps tools before returning their runtime state.
+    pub async fn refresh_codex_apps_tools(
+        &self,
+    ) -> anyhow::Result<codex_mcp::CodexAppsToolSnapshot> {
+        self.session.refresh_codex_apps_tools().await
     }
 
     pub async fn environment_selections(&self) -> Vec<TurnEnvironmentSelection> {

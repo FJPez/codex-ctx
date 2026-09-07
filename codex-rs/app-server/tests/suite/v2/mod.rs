@@ -14,10 +14,12 @@ mod collaboration_mode_list;
 mod command_exec;
 mod compaction;
 mod config_requirements_application;
+#[path = "config_requirements_browser_use_tests.rs"]
+mod config_requirements_browser_use;
 mod config_requirements_in_app_browser;
 mod config_rpc;
 mod connection_handling_websocket;
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 mod connection_handling_websocket_unix;
 #[cfg(unix)]
 mod curated_mcp_sync;
@@ -128,3 +130,5 @@ mod turn_steer;
 mod view_image;
 mod web_search;
 mod windows_sandbox_setup;
+
+mod user_verification;

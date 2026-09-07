@@ -551,7 +551,7 @@ impl App {
                     },
                 })
                 .await;
-            let Ok(ThreadReadResponse { thread }) = thread else {
+            let Ok(ThreadReadResponse { thread, .. }) = thread else {
                 return;
             };
             let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {

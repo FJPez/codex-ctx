@@ -60,6 +60,7 @@ use super::metrics::TOOL_CALL_LAG_METRIC;
 use super::metrics::record_classification;
 use super::metrics::record_classification_risk;
 use super::metrics::record_fast_decision;
+use super::metrics::sampler_failure_reason;
 use super::review_evidence::render_review_evidence;
 use super::sampler::LunaSampler;
 use super::sampler::LunaSamplerConfig;
@@ -85,14 +86,14 @@ enum ClassificationOutcome {
 }
 
 #[derive(Default)]
-struct GuardianV2ScoreProgress {
-    latest_tool_call: AtomicUsize,
+pub(super) struct GuardianV2ScoreProgress {
+    pub(super) latest_tool_call: AtomicUsize,
     // Setup and reset calls must not consume the first JS execution allowance.
-    js_executions: AtomicUsize,
-    latest_scored_tool_call: AtomicUsize,
-    latest_failed_tool_call: AtomicUsize,
+    pub(super) js_executions: AtomicUsize,
+    pub(super) latest_scored_tool_call: AtomicUsize,
+    pub(super) latest_failed_tool_call: AtomicUsize,
     // Serialize successful score publication with its authorization metadata.
-    authorization: Mutex<Option<ScoreAuthorization>>,
+    pub(super) authorization: Mutex<Option<ScoreAuthorization>>,
     metrics: Option<Arc<dyn ExtensionMetrics>>,
 }
 
@@ -324,7 +325,13 @@ impl ApprovalReviewContributor for GuardianV2Extension {
             let history = thread.conversation_history_snapshot().await;
             if thread_context_enabled {
                 let sampler = thread_store.get::<LunaSampler>()?;
-                if requires_sync_for_compaction(&guardian_config, history.as_ref(), &sampler) {
+                if requires_sync_for_compaction(&guardian_config, history.as_ref(), &sampler)
+                    || encrypted_parent_compaction(
+                        history.items(),
+                        guardian_config.max_parent_compaction_tokens,
+                    )
+                    .is_err()
+                {
                     thread_store.insert(StrictReviewReason::IncompatibleCompaction);
                     record_fast_decision(
                         extension_metrics.as_deref(),
@@ -506,6 +513,10 @@ impl GuardianV2Extension {
         let thread_id = input.thread_store.level_id().to_owned();
         let turn_id = input.turn_id.to_owned();
         let root_turn_id = input.root_turn_id.map(str::to_owned);
+        let parent_response_id = input
+            .turn_store
+            .get::<codex_api::ResponseId>()
+            .map(|id| id.0.clone());
         let thread_context: Result<_, String> = async {
             let parsed_thread_id =
                 ThreadId::from_string(&thread_id).map_err(|error| error.to_string())?;
@@ -531,6 +542,7 @@ impl GuardianV2Extension {
                     metrics.as_deref(),
                     classification_started_at.elapsed(),
                     "failure",
+                    Some("thread_context_error"),
                 );
                 event_sink.emit_warning(ExtensionWarning {
                     thread_id,
@@ -576,6 +588,7 @@ impl GuardianV2Extension {
                     metrics.as_deref(),
                     classification_started_at.elapsed(),
                     "failure",
+                    Some("configuration_error"),
                 );
                 self.event_sink.emit_warning(ExtensionWarning {
                     thread_id: input.thread_store.level_id().to_owned(),
@@ -611,6 +624,7 @@ impl GuardianV2Extension {
                 metrics.as_deref(),
                 classification_started_at.elapsed(),
                 "skipped",
+                /*failure_reason*/ None,
             );
             return;
         }
@@ -630,12 +644,14 @@ impl GuardianV2Extension {
                 guardian_config.max_parent_compaction_tokens,
             ) {
                 Ok(compaction) => compaction,
+                Err(ParentCompactionError::Unusable) if !thread_context_enabled => None,
                 Err(_) => {
                     Self::record_fail_closed_score(input.thread_store, sampled_at);
                     record_classification(
                         metrics.as_deref(),
                         classification_started_at.elapsed(),
                         "failure",
+                        Some("parent_compaction_error"),
                     );
                     return;
                 }
@@ -679,6 +695,13 @@ impl GuardianV2Extension {
         let rendered_images = guardian_config
             .transcript
             .images(input.conversation_history.review_items(), node_repl_images);
+        // Capture root evidence before background metadata resolution or model I/O.
+        // Later root changes invalidate this sample through its captured authorization version.
+        let root_snapshot = if thread_context_enabled {
+            thread.guardian_root_snapshot().await
+        } else {
+            None
+        };
 
         let score_authorization = ScoreAuthorization::current(&thread).await;
         tokio::spawn(async move {
@@ -689,7 +712,11 @@ impl GuardianV2Extension {
                 }
                 None => None,
             };
-            let root_snapshot = thread.guardian_root_snapshot().await;
+            let root_snapshot = if thread_context_enabled {
+                root_snapshot
+            } else {
+                thread.guardian_root_snapshot().await
+            };
             let mut trusted_skills = TrustedSkillInvocations::default();
             for path in local_trusted_skill_paths.iter().chain(
                 root_snapshot
@@ -723,6 +750,7 @@ impl GuardianV2Extension {
                         metrics.as_deref(),
                         classification_started_at.elapsed(),
                         "failure",
+                        Some("context_build_error"),
                     );
                     event_sink.emit_warning(ExtensionWarning {
                         thread_id,
@@ -754,6 +782,7 @@ impl GuardianV2Extension {
                         metrics.as_deref(),
                         classification_started_at.elapsed(),
                         "failure",
+                        Some("action_serialization_error"),
                     );
                     event_sink.emit_warning(ExtensionWarning {
                         thread_id,
@@ -786,6 +815,7 @@ impl GuardianV2Extension {
                 format!("{planned_action}\n"),
                 ">>> APPROVAL REQUEST END\n".to_owned(),
             ]);
+            let mut failure_reason = "invalid_output";
             let mut classification_risk = None;
             let mut classification_finished_at = None;
             let result: Result<ClassificationOutcome, String> = async {
@@ -816,6 +846,7 @@ impl GuardianV2Extension {
                 let instructions = guardian_config.render_classifier_instructions(policy);
                 let output = match sampler
                     .sample(LunaSamplingRequest {
+                        parent_response_id,
                         instructions,
                         trusted_review_evidence,
                         trusted_tool_context,
@@ -834,7 +865,10 @@ impl GuardianV2Extension {
                     Err(LunaSamplerError::Superseded) => {
                         return Ok(ClassificationOutcome::Superseded);
                     }
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => {
+                        failure_reason = sampler_failure_reason(&error);
+                        return Err(error.to_string());
+                    }
                 };
                 let (action_risk, risk_level) = match output.as_str() {
                     "high" => (1.0, "high"),
@@ -842,6 +876,7 @@ impl GuardianV2Extension {
                     _ => return Err("invalid Guardian V2 classification".to_owned()),
                 };
                 classification_risk = Some(risk_level);
+                failure_reason = "action_deserialization_error";
                 let score = SecurityRiskScore {
                     scores: BTreeMap::from([("action_risk".to_owned(), action_risk)]),
                     call_id: Some(call_id.clone()),
@@ -917,7 +952,12 @@ impl GuardianV2Extension {
                 Ok(ClassificationOutcome::Superseded) => "superseded",
                 Err(_) => "failure",
             };
-            record_classification(metrics.as_deref(), duration, outcome);
+            record_classification(
+                metrics.as_deref(),
+                duration,
+                outcome,
+                result.is_err().then_some(failure_reason),
+            );
             if let Some(analytics) = analytics {
                 analytics.track_guardian_v2_event(GuardianV2Event {
                     thread_id: thread_id.clone(),
@@ -950,26 +990,26 @@ impl GuardianV2Extension {
 enum ParentCompactionError {
     Serialization,
     Oversized,
+    Unusable,
 }
 
 // Sampling and fast approval must apply the same checkpoint eligibility policy.
-fn requires_sync_for_compaction(
+pub(super) fn requires_sync_for_compaction(
     config: &GuardianV2Config,
     history: &dyn ConversationHistorySnapshot,
     sampler: &LunaSampler,
 ) -> bool {
-    config.reuse_parent_compaction
-        && history.items().any(|item| {
-            matches!(
-                item,
-                ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-            )
-        })
-        && !sampler.supports_parent_compaction(history.latest_compaction_model_hash())
+    history.items().any(|item| {
+        matches!(
+            item,
+            ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+        )
+    }) && (!config.reuse_parent_compaction
+        || !sampler.supports_parent_compaction(history.latest_compaction_model_hash()))
 }
 
 // An unusable latest compaction must never fall back to an older one. Missing
-// encrypted content can be omitted; content that cannot be bounded rejects the sample.
+// encrypted content is rejected here; only legacy callers may omit that checkpoint.
 fn encrypted_parent_compaction<'a>(
     items: impl Iterator<Item = &'a ResponseItem>,
     max_parent_compaction_tokens: usize,
@@ -998,10 +1038,10 @@ fn encrypted_parent_compaction<'a>(
             encrypted_content: Some(encrypted_content),
             ..
         } => encrypted_content,
-        _ => return Ok(None),
+        _ => return Err(ParentCompactionError::Unusable),
     };
     if encrypted_content.is_empty() {
-        return Ok(None);
+        return Err(ParentCompactionError::Unusable);
     }
     let serialized = serde_json::to_vec(item).map_err(|_| ParentCompactionError::Serialization)?;
     if serialized.len() > max_compaction_bytes {
@@ -1020,9 +1060,12 @@ pub fn install(
     let extension = Arc::new(GuardianV2Extension {
         auth_manager,
         event_sink: registry.event_sink(),
-        thread_manager,
+        thread_manager: thread_manager.clone(),
     });
     registry.thread_lifecycle_contributor(extension.clone());
+    registry.approval_review_contributor(Arc::new(super::approval::GuardianApprovalReviewer {
+        thread_manager,
+    }));
     registry.approval_review_contributor(extension.clone());
     registry.skill_invocation_contributor(extension.clone());
     registry.tool_lifecycle_contributor(extension);

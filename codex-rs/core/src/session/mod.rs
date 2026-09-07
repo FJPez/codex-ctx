@@ -230,6 +230,7 @@ mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
 mod realtime_history;
+mod reasoning_effort;
 mod retained_context;
 mod review;
 mod rollout_budget;
@@ -293,6 +294,7 @@ use crate::network_policy_decision::execpolicy_network_rule_amendment;
 use crate::rollout::map_session_init_error;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
 use crate::shell;
+use crate::state::AcceptedUserInputResponse;
 use crate::state::AutoCompactWindowIds;
 use crate::state::AutoCompactWindowSnapshot;
 use crate::state::PendingRequestPermissions;
@@ -319,6 +321,7 @@ use codex_core_plugins::PluginCommandAttribution;
 use codex_core_plugins::PluginsManager;
 use codex_core_plugins::RecommendedPluginCandidatesInput;
 use codex_git_utils::get_git_repo_root;
+use codex_history::CodexHarnessMetadata;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
@@ -684,11 +687,22 @@ impl Session {
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
         let auth = auth_manager.auth_cached();
-        token_budget::apply_experimental_context(Arc::make_mut(&mut config), auth.as_ref())?;
-        // Intentionally resolve `enabled` and `use_history_notes_extension` only at
-        // thread startup. Both activation flags stay fixed for this thread runtime,
-        // even if the selected model changes later.
-        token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
+        // Forked subagents keep their parent's activation with the copied history.
+        // Fresh children restore configured preferences before applying startup defaults.
+        let inherits_token_budget = matches!(&conversation_history, InitialHistory::Forked(_))
+            && config.token_budget_startup_config.is_some();
+        if !inherits_token_budget {
+            Arc::make_mut(&mut config)
+                .prepare_token_budget_for_startup()
+                .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
+            // Resolve activation for this runtime, including when resuming saved history.
+            token_budget::apply_experimental_context(
+                Arc::make_mut(&mut config),
+                auth.as_ref(),
+                &model_info,
+            )?;
+            token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
+        }
         let configured_config = Arc::clone(&config);
         let multi_agent_version = config.multi_agent_version_override().or_else(|| {
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
@@ -1589,8 +1603,7 @@ impl Session {
             );
             state
                 .history
-                .restore_guardian_history(guardian_history.as_ref());
-            state.history.restore_retained_context(&retained_context);
+                .restore_review_context(Some(&retained_context), guardian_history.as_ref());
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }
@@ -2945,12 +2958,12 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
-    pub async fn request_user_input(
+    pub(crate) async fn request_user_input(
         &self,
         turn_context: &TurnContext,
         call_id: String,
         args: RequestUserInputArgs,
-    ) -> Option<RequestUserInputResponse> {
+    ) -> Option<AcceptedUserInputResponse> {
         let _elicitation = self.services.elicitations.register();
         let sub_id = turn_context.sub_id.clone();
         let (tx_response, rx_response) = oneshot::channel();
@@ -2996,15 +3009,23 @@ impl Session {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    ts.remove_pending_user_input(sub_id)
+                    let sender = at.turn_state.lock().await.remove_pending_user_input(sub_id);
+                    match sender {
+                        Some(sender) => Some((sender, self.reserve_user_input_order().await)),
+                        None => None,
+                    }
                 }
                 None => None,
             }
         };
         match entry {
-            Some(tx_response) => {
-                tx_response.send(response).ok();
+            Some((tx_response, acceptance_order)) => {
+                tx_response
+                    .send(AcceptedUserInputResponse {
+                        response,
+                        acceptance_order,
+                    })
+                    .ok();
             }
             None => {
                 warn!("No pending user input found for sub_id: {sub_id}");
@@ -4537,14 +4558,24 @@ impl Session {
         turn_context: &TurnContext,
         input: &[UserInput],
         client_id: Option<String>,
+        acceptance_order: Option<u64>,
         persist_context: PersistContext,
     ) {
         // Persist the user message to history, but emit the turn item from `UserInput` so
         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
         let response_item = self.response_item_from_user_input(input.to_vec());
-        self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
-            .await;
+        self.record_annotated_conversation_items(
+            turn_context,
+            vec![ResponseItemEnvelope {
+                item: response_item,
+                metadata: acceptance_order.map(|order| CodexHarnessMetadata {
+                    user_input_order: Some(order),
+                    ..Default::default()
+                }),
+            }],
+        )
+        .await;
         let mut user_message_item = UserMessageItem::new(input);
         user_message_item.client_id = client_id;
         let turn_item = TurnItem::UserMessage(user_message_item);
