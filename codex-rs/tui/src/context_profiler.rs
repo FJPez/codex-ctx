@@ -6,16 +6,8 @@
 //! effort: any failure to open or write it drops the trace only, never the profiling.
 
 mod adapter;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "rendered by the upcoming /ctx command")
-)]
 mod card;
 mod log;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "rendered by the upcoming /ctx command")
-)]
 mod view;
 
 use std::collections::HashMap;
@@ -29,19 +21,11 @@ use codex_protocol::ThreadId;
 
 use crate::legacy_core::config::Config;
 use adapter::ThreadProfilerAdapter;
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "wired by the upcoming /ctx command")
-)]
 pub(crate) use card::build;
 use log::ProfilerLog;
 use log::RecordedEvent;
 use log::attached_record;
 use log::to_record;
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "wired by the upcoming /ctx command")
-)]
 pub(crate) use view::new_context_card_cell;
 
 /// The adapter and profiler for one observed thread.
@@ -121,10 +105,6 @@ impl ProfilerRegistry {
         self.attach(thread_id, ObservationStart::SessionStart);
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the upcoming /ctx view")
-    )]
     pub(crate) fn state(&self, thread_id: &ThreadId) -> Option<&ProfilerState> {
         self.threads
             .get(thread_id)

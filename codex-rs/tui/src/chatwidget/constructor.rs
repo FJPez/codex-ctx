@@ -291,6 +291,7 @@ impl ChatWidget {
         widget.sync_worktrees_enabled();
         widget.sync_plugins_command_enabled();
         widget.sync_goal_command_enabled();
+        widget.sync_ctx_command_enabled();
         widget.sync_mentions_v2_enabled();
         widget
             .bottom_pane

@@ -136,6 +136,7 @@ impl ChatWidget {
         self.sync_worktrees_enabled();
         self.sync_plugins_command_enabled();
         self.sync_goal_command_enabled();
+        self.sync_ctx_command_enabled();
         self.refresh_plugin_mentions();
         let model_for_header = self.current_model().to_string();
         if matches!(

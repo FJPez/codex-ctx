@@ -553,6 +553,7 @@ pub(crate) struct ChatComposer {
     service_tier_commands: Vec<ServiceTierCommand>,
     mentions_v2_enabled: bool,
     goal_command_enabled: bool,
+    ctx_command_enabled: bool,
     personality_command_enabled: bool,
     worktrees_enabled: bool,
     windows_degraded_sandbox_active: bool,
@@ -717,6 +718,7 @@ impl ChatComposer {
             service_tier_commands: Vec::new(),
             mentions_v2_enabled: false,
             goal_command_enabled: false,
+            ctx_command_enabled: false,
             personality_command_enabled: false,
             worktrees_enabled: false,
             windows_degraded_sandbox_active: false,
@@ -922,6 +924,10 @@ impl ChatComposer {
 
     pub fn set_goal_command_enabled(&mut self, enabled: bool) {
         self.goal_command_enabled = enabled;
+    }
+
+    pub fn set_ctx_command_enabled(&mut self, enabled: bool) {
+        self.ctx_command_enabled = enabled;
     }
 
     /// Replace composer, editor, and footer-hint key bindings from one runtime snapshot.

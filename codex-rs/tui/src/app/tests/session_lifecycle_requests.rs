@@ -1301,6 +1301,59 @@ async fn startup_attaches_the_profiler_before_draining_buffered_events() -> Resu
 }
 
 /// A user prompt and a consistent usage anchor: the smallest eligible first request.
+/// The card must read the displayed thread's profiler, not an empty default one.
+#[tokio::test]
+async fn slash_ctx_card_reports_the_displayed_thread_context() -> Result<()> {
+    let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
+    let codex_home = tempdir()?;
+    app.config.codex_home = codex_home.path().to_path_buf().abs();
+    app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());
+    app.config
+        .features
+        .enable(Feature::ContextProfiler)
+        .expect("test config should allow the context profiler");
+    app.config.log_dir = codex_home.path().join("log");
+    app.profiler = crate::context_profiler::ProfilerRegistry::enabled(&app.config);
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+
+    let started = app_server.start_thread(&app.config).await?;
+    let thread_id = started.session.thread_id;
+    app.pending_startup_thread_start = true;
+    for notification in profiler_first_request(thread_id) {
+        app.pending_primary_events
+            .push_back(ThreadBufferedEvent::Notification(Box::new(notification)));
+    }
+    app.handle_startup_thread_started(&mut app_server, Ok(started))
+        .await?;
+
+    app.show_context_profile();
+
+    let mut card = None;
+    while let Ok(event) = events.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            card = Some(cell);
+        }
+    }
+    let rendered: Vec<String> = card
+        .expect("/ctx inserts a history cell")
+        .transcript_lines(u16::MAX)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert_eq!(rendered.first().map(String::as_str), Some("/ctx"));
+    assert!(
+        rendered.iter().any(|line| line.contains("1,200")),
+        "expected the reported context total, got {rendered:?}"
+    );
+
+    Ok(())
+}
+
 fn profiler_first_request(thread_id: ThreadId) -> Vec<ServerNotification> {
     use codex_app_server_protocol::RawResponseCompletedNotification;
     use codex_app_server_protocol::RawResponseItemCompletedNotification;

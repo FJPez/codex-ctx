@@ -493,6 +493,9 @@ pub(crate) enum AppEvent {
         text: String,
     },
 
+    /// Insert the `/ctx` context breakdown card for the displayed thread into history.
+    ShowContextProfile,
+
     /// Open the resume picker inside the running TUI session.
     OpenResumePicker,
 

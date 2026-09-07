@@ -284,6 +284,9 @@ impl App {
                 )
                 .await;
             }
+            AppEvent::ShowContextProfile => {
+                self.show_context_profile();
+            }
             AppEvent::OpenResumePicker => {
                 self.pending_open_resume_picker = true;
             }
