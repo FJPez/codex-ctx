@@ -1479,6 +1479,52 @@ closed on the tidy branch before M3.
   and the hidden residual exactly; it is recorded here so it is not rediscovered, and not pursued
   while the profiler stays a passive observer of the stream.
 
+### Performance baseline (before M5)
+
+These numbers cover the profiler fold and the card's build and render only. They exclude
+notification decoding, trace writing, and terminal drawing, so they are not total TUI overhead.
+Taken on 2026-09-08 on an Apple M2 (8 cores, 8 GB, macOS 15.5, rustc 1.93.1) from
+`context-profiler/benches/fold.rs` (Divan, release) and the ignored `card_benchmark` test in
+`tui/src/context_profiler/card_tests.rs` (debug build: a release build of the TUI test binary
+could not complete on this machine within memory).
+
+**Workload assumption.** A synthetic session shaped like the recorded traces: about three items
+per usage anchor and three to four anchors per turn, each turn a user message, two reasoning
+items, two tool call/output pairs of 0.6-3 KB, an assistant message, and an instruction fragment
+every fourth turn, 8.25 items per turn on average, so 5,000 items is about 606 synthetic turns.
+The traces themselves are short check sessions (at most 42 items, 13 anchors), so "5,000 items
+is a long day" is an extrapolation. 20,000 is a stress point, not a target.
+
+The `item` column is the first item appended to a freshly cloned, completed session: the clone
+has no spare vector capacity, so every sample includes growing the item vector, and the closed
+turn means it also opens an implicit turn. A live session pays the growth only occasionally; the
+ingest column contains the natural mix.
+
+| items in history | one item (median) | one anchor (median) | ingest whole session | card build (debug, median) | card render at 80 cols (debug, median) |
+|---|---|---|---|---|---|
+| 500 | 48 us | 47 us | 17 ms | 0.09 ms | 0.40 ms |
+| 2,000 | 185 us | 203 us | 287 ms | 0.43 ms | 0.41 ms |
+| 5,000 | 538 us | 544 us | 1.9 s | 1.2 ms | 0.40 ms |
+| 10,000 | 1.06 ms | 1.11 ms | 7.4 s | 2.6 ms | 0.42 ms |
+| 20,000 | 2.9 ms | 2.5 ms | 29.6 s | 5.5 ms | 0.42 ms |
+
+**Reading.** Observed per-event cost scales linearly with the retained history, about 100 ns per
+item, for both items and anchors. That is consistent with the per-event passes the code makes
+(`rebuild_aggregates` after every event, `positions` and `span_is_ambiguous` at every anchor),
+but a whole-event timing does not apportion the cost between those passes, allocation, and the
+rest; that would need a profiler. Ingest is correspondingly quadratic: 1.9 s spread over a
+5,000-item session, 30 s over 20,000. Card build scales roughly linearly over this range (the
+algorithm sorts groups, so it is n log n) and render is flat, since the card draws a fixed set of
+blocks whatever the history size.
+
+**Outcome.** At the realistic size every figure is under its investigation trigger (item under
+1 ms, anchor under 5 ms, build plus render under 50 ms), so the current approach stays as it is
+and this question is closed. The observed linear-per-event growth is recorded as the
+limitation: at 20,000 items each event costs about 3 ms and the session's cumulative fold
+reaches half a minute. That is the input to M5's retention design, not a reason to optimise now; on-demand
+aggregates at `/ctx` time may prove simpler than maintaining them incrementally. Rerun both
+measurements after M5 for the comparison.
+
 ### Resolved since the first draft
 
 **Unsizable items are counted, not silently zero** (M2d): one shared `serialized_size` helper

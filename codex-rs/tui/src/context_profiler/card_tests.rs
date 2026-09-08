@@ -1,3 +1,6 @@
+use std::time::Duration;
+use std::time::Instant;
+
 use codex_context_profiler::ContextProfiler;
 use codex_context_profiler::InvalidationReason;
 use codex_context_profiler::ObservationStart;
@@ -5,6 +8,7 @@ use codex_context_profiler::ProfilerEvent;
 use codex_context_profiler::ProfilerState;
 use codex_context_profiler::TokenCost;
 use codex_context_profiler::UsageSnapshot;
+use codex_context_profiler::serialized_size;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -402,4 +406,176 @@ fn long_contributor_label() {
         &format!("{} +2", "n".repeat(70)),
     );
     insta::assert_snapshot!(render(profiler.state(), 80));
+}
+
+const BENCHMARK_SIZES: [usize; 5] = [500, 2_000, 5_000, 10_000, 20_000];
+const BENCHMARK_WARM_UPS: usize = 3;
+const BENCHMARK_SAMPLES: usize = 20;
+/// Every response in the benchmark session reports the same output total.
+const BENCHMARK_OUTPUT_TOKENS: i64 = 150;
+/// Mirrors the estimator's 4.64 bytes per token, so anchors land near the estimates they price.
+const BYTES_PER_HUNDRED_TOKENS: i64 = 464;
+/// A plausible startup context: tool schemas plus the system prompt.
+const BENCHMARK_STARTUP_INPUT_TOKENS: i64 = 2_000;
+
+fn benchmark_call(index: usize) -> ResponseItem {
+    ResponseItem::FunctionCall {
+        id: None,
+        name: "exec".to_string(),
+        namespace: None,
+        arguments: format!("{{\"command\":\"{}\"}}", "c".repeat(180)),
+        encrypted_function_args: None,
+        call_id: format!("call-{index}"),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn benchmark_output(index: usize, bytes: usize) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some(format!("call-{index}")),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text("o".repeat(bytes)),
+            success: Some(true),
+        },
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn benchmark_reasoning() -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: None,
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some("r".repeat(150)),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+/// The responses of one benchmark turn: three, plus a reminder response on every fourth turn.
+fn benchmark_responses(turn: usize, first_call: usize) -> Vec<Vec<ResponseItem>> {
+    let output_bytes = 1_024 + (turn % 3) * 1_024;
+    let mut responses = vec![
+        vec![
+            user_message(&"u".repeat(120)),
+            benchmark_reasoning(),
+            benchmark_call(first_call),
+        ],
+        vec![
+            benchmark_output(first_call, output_bytes),
+            benchmark_reasoning(),
+            assistant_message(&"a".repeat(300)),
+        ],
+        vec![
+            benchmark_call(first_call + 3),
+            benchmark_output(first_call + 3, 600),
+        ],
+    ];
+    if turn % 4 == 3 {
+        responses.push(vec![instruction_message(
+            "current_time.reminder",
+            &"i".repeat(200),
+        )]);
+    }
+    responses
+}
+
+/// A synthetic session of `size` items, shaped like the recorded traces.
+fn benchmark_state(size: usize) -> ProfilerState {
+    let mut profiler = ContextProfiler::new(ObservationStart::SessionStart);
+    let mut items_seq = 0usize;
+    let mut input = BENCHMARK_STARTUP_INPUT_TOKENS;
+    let mut previous_output = 0;
+    let mut turn = 0usize;
+    while items_seq < size {
+        let turn_id = format!("turn-{turn}");
+        profiler.observe(ProfilerEvent::TurnStarted { turn_id: &turn_id });
+        if turn == 0 {
+            profiler.observe(ProfilerEvent::WindowUpdated {
+                turn_id: &turn_id,
+                window: WINDOW,
+            });
+        }
+        for response in benchmark_responses(turn, items_seq) {
+            let mut span_bytes = 0usize;
+            for item in &response {
+                span_bytes += serialized_size(item).unwrap_or(0);
+                items_seq += 1;
+                profiler.observe(ProfilerEvent::Item {
+                    turn_id: &turn_id,
+                    item,
+                });
+            }
+            // Last response's output becomes this request's input, so the input delta across a
+            // span is the span's own estimated size.
+            input += span_bytes as i64 * 100 / BYTES_PER_HUNDRED_TOKENS + previous_output;
+            previous_output = BENCHMARK_OUTPUT_TOKENS;
+            profiler.observe(ProfilerEvent::Usage {
+                turn_id: &turn_id,
+                usage: anchor(input, BENCHMARK_OUTPUT_TOKENS, items_seq as u64),
+            });
+            if items_seq >= size {
+                break;
+            }
+        }
+        profiler.observe(ProfilerEvent::TurnEnded {
+            turn_id: &turn_id,
+            completed: true,
+        });
+        turn += 1;
+    }
+    profiler.state().clone()
+}
+
+fn min_median_micros(samples: &mut [Duration]) -> (u128, u128) {
+    samples.sort_unstable();
+    let min = samples.first().map_or(0, Duration::as_micros);
+    let median = samples.get(samples.len() / 2).map_or(0, Duration::as_micros);
+    (min, median)
+}
+
+/// The documented exception to the Divan convention: `build` and `new_context_card_cell` are
+/// `pub(crate)`, so a bench target cannot reach them.
+#[test]
+#[ignore]
+#[allow(clippy::print_stdout)]
+fn card_benchmark() {
+    for size in BENCHMARK_SIZES {
+        let state = benchmark_state(size);
+
+        for _ in 0..BENCHMARK_WARM_UPS {
+            let card = build(&state);
+            std::hint::black_box(&card);
+        }
+        let mut build_samples = Vec::new();
+        for _ in 0..BENCHMARK_SAMPLES {
+            let started = Instant::now();
+            let card = build(&state);
+            let elapsed = started.elapsed();
+            std::hint::black_box(&card);
+            build_samples.push(elapsed);
+        }
+
+        let cell = new_context_card_cell(build(&state));
+        for _ in 0..BENCHMARK_WARM_UPS {
+            let lines = cell.display_lines(80);
+            std::hint::black_box(&lines);
+        }
+        let mut render_samples = Vec::new();
+        for _ in 0..BENCHMARK_SAMPLES {
+            let started = Instant::now();
+            let lines = cell.display_lines(80);
+            let elapsed = started.elapsed();
+            std::hint::black_box(&lines);
+            render_samples.push(elapsed);
+        }
+
+        let (build_min, build_median) = min_median_micros(&mut build_samples);
+        let (render_min, render_median) = min_median_micros(&mut render_samples);
+        println!(
+            "{size}, build min {build_min} us, build median {build_median} us, render min {render_min} us, render median {render_median} us"
+        );
+    }
 }
