@@ -37,7 +37,7 @@ enum TurnOutcome {
 }
 
 /// The turn currently being folded; becomes a `TurnDelta` when it closes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct OpenTurn {
     turn_id: String,
     index: u32,
@@ -48,7 +48,7 @@ struct OpenTurn {
     last_anchor_seq: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ContextProfiler {
     state: ProfilerState,
     /// Items observed so far; incremented before it is stamped, matching the TUI adapter.
