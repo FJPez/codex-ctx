@@ -41,6 +41,7 @@ pub enum SlashCommand {
     Compact,
     Recap,
     Plan,
+    Voice,
     Goal,
     Agents,
     Side,
@@ -132,6 +133,7 @@ impl SlashCommand {
             }
             SlashCommand::Personality => "choose a communication style for Codex",
             SlashCommand::Plan => "switch to Plan mode",
+            SlashCommand::Voice => "start or stop a live voice conversation",
             SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Agents => "view and switch between all active agent sessions",
             SlashCommand::MultiAgents => "switch between this session's subagents",
@@ -174,6 +176,7 @@ impl SlashCommand {
                 | SlashCommand::Fork
                 | SlashCommand::Plan
                 | SlashCommand::Goal
+                | SlashCommand::Voice
                 | SlashCommand::Ide
                 | SlashCommand::Keymap
                 | SlashCommand::Mcp
@@ -253,6 +256,7 @@ impl SlashCommand {
             | SlashCommand::Stop
             | SlashCommand::App
             | SlashCommand::Goal
+            | SlashCommand::Voice
             | SlashCommand::Mcp
             | SlashCommand::Apps
             | SlashCommand::Plugins
@@ -277,6 +281,7 @@ impl SlashCommand {
             SlashCommand::SandboxReadRoot => cfg!(target_os = "windows"),
             SlashCommand::Copy => !cfg!(target_os = "android"),
             SlashCommand::App => cfg!(any(target_os = "macos", target_os = "windows")),
+            SlashCommand::Voice => true,
             SlashCommand::Rollout | SlashCommand::TestApproval => cfg!(debug_assertions),
             _ => true,
         }

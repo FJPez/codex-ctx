@@ -2225,6 +2225,7 @@ dependencies = [
  "codex-state",
  "codex-thread-store",
  "codex-tools",
+ "codex-user-verification",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
  "codex-utils-cli",
@@ -2298,6 +2299,7 @@ name = "codex-app-server-daemon"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "codex-app-server-protocol",
  "codex-app-server-transport",
  "codex-http-client",
@@ -2308,7 +2310,6 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -2533,6 +2534,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 
@@ -3549,6 +3551,7 @@ dependencies = [
 name = "codex-guardian-context"
 version = "0.0.0"
 dependencies = [
+ "codex-context-fragments",
  "codex-history",
  "codex-protocol",
  "pretty_assertions",
@@ -3571,8 +3574,6 @@ dependencies = [
  "codex-login",
  "codex-model-provider",
  "codex-model-provider-info",
- "codex-models-manager",
- "codex-network-proxy",
  "codex-protocol",
  "core_test_support",
  "dirs",
@@ -4688,6 +4689,7 @@ dependencies = [
  "codex-otel",
  "codex-plugin",
  "codex-protocol",
+ "codex-realtime-webrtc",
  "codex-rollout",
  "codex-sandboxing",
  "codex-shell-command",
@@ -4777,6 +4779,17 @@ dependencies = [
  "tokio-util",
  "uds_windows",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "codex-user-verification"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "p256",
+ "pretty_assertions",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

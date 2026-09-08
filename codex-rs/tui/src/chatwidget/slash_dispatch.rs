@@ -333,6 +333,9 @@ impl ChatWidget {
                     );
                 }
             }
+            SlashCommand::Voice => {
+                self.toggle_realtime_conversation();
+            }
             SlashCommand::Side | SlashCommand::Btw => {
                 self.request_empty_side_conversation(cmd);
             }
@@ -760,6 +763,11 @@ impl ChatWidget {
                     }
                 }
             }
+            SlashCommand::Voice => match trimmed.to_ascii_lowercase().as_str() {
+                "mute" => self.toggle_realtime_microphone(),
+                "stop" => self.stop_realtime_conversation(),
+                _ => self.add_error_message("Usage: /voice [mute|stop]".to_string()),
+            },
             SlashCommand::Ide => {
                 self.handle_ide_command_args(trimmed);
             }
@@ -1148,6 +1156,7 @@ impl ChatWidget {
             ctx_command_enabled: self.config.features.enabled(Feature::ContextProfiler),
             service_tier_commands_enabled: self.fast_mode_enabled(),
             personality_command_enabled: self.config.features.enabled(Feature::Personality),
+            voice_command_enabled: self.realtime_conversation_available_for_thread,
             worktrees_enabled: self.config.features.enabled(Feature::Worktrees)
                 && self.local_worktree_operations,
             allow_elevate_sandbox,
@@ -1188,6 +1197,7 @@ impl ChatWidget {
             | SlashCommand::Diff
             | SlashCommand::App
             | SlashCommand::Rename
+            | SlashCommand::Voice
             | SlashCommand::Recap
             | SlashCommand::TestApproval => QueueDrain::Continue,
             SlashCommand::Cd => match self.thread_id {
