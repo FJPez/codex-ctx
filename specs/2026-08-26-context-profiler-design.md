@@ -1087,6 +1087,13 @@ Share rules follow from that: a row rounding to 0% draws no bar, a negative valu
 all, and shares are never clamped to 100% - a frozen baseline can exceed a total that has since
 shrunk, and hiding that would hide a real disagreement.
 
+**Bars are on a 100% scale, not relative to the largest row.** A full bar (14 cells, fewer when
+the terminal is narrow) means the whole context, so a bar reads the same on every card and a 1%
+row never looks large just because nothing else is bigger. Any positive displayed share gets at
+least one cell. The bar saturates at 100% while the numeric percentage beside it stays uncapped,
+so a share above 100% shows a full bar and its true figure. The column keeps its full width even
+when every bar is short, so the scale stays visible.
+
 **The footer is the reported total, and the rows above it split into two kinds.** Items sum to
 `total`; the baseline is by definition what we *cannot* attribute to any item, so folding it into
 that sum would be self-contradictory. With a baseline the rows are the categories, then the
