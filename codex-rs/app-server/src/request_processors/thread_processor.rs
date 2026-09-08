@@ -3699,6 +3699,7 @@ impl ThreadRequestProcessor {
             personality,
             exclude_turns,
             initial_turns_page,
+            experimental_raw_events,
         } = params.clone();
         let include_turns = !exclude_turns;
 
@@ -3973,7 +3974,7 @@ impl ThreadRequestProcessor {
                     self.ensure_conversation_listener(
                         thread_id,
                         request_id.connection_id,
-                        /*raw_events_enabled*/ false,
+                        experimental_raw_events,
                     )
                     .await,
                     thread_id,
@@ -4455,6 +4456,7 @@ impl ThreadRequestProcessor {
                     paginated_initial_turns_page_with_active_slot,
                     resume_cursor_store,
                     redact_resume_payloads,
+                    experimental_raw_events: params.experimental_raw_events,
                 }),
             );
             if listener_command_tx.send(command).is_err() {
@@ -4796,6 +4798,7 @@ impl ThreadRequestProcessor {
             thread_source,
             exclude_turns,
             defer_goal_continuation,
+            experimental_raw_events,
         } = params;
         let include_turns = !exclude_turns;
         if sandbox.is_some() && permissions.is_some() {
@@ -5191,7 +5194,7 @@ impl ThreadRequestProcessor {
             self.ensure_conversation_listener(
                 thread_id,
                 request_id.connection_id,
-                /*raw_events_enabled*/ false,
+                experimental_raw_events,
             )
             .await,
             thread_id,

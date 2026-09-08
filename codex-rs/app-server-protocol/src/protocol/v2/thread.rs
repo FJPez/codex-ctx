@@ -407,6 +407,11 @@ pub struct ThreadResumeParams {
     #[experimental("thread/resume.initialTurnsPage")]
     #[ts(optional = nullable)]
     pub initial_turns_page: Option<ThreadResumeInitialTurnsPageParams>,
+    /// If true, opt into emitting raw Responses API items on the event stream.
+    /// This is for internal use only (e.g. Codex Cloud).
+    #[experimental("thread/resume.experimentalRawEvents")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub experimental_raw_events: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
@@ -598,6 +603,11 @@ pub struct ThreadForkParams {
     #[experimental("thread/fork.deferGoalContinuation")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub defer_goal_continuation: bool,
+    /// If true, opt into emitting raw Responses API items on the event stream.
+    /// This is for internal use only (e.g. Codex Cloud).
+    #[experimental("thread/fork.experimentalRawEvents")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub experimental_raw_events: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]

@@ -1087,6 +1087,13 @@ Share rules follow from that: a row rounding to 0% draws no bar, a negative valu
 all, and shares are never clamped to 100% - a frozen baseline can exceed a total that has since
 shrunk, and hiding that would hide a real disagreement.
 
+**Bars are on a 100% scale, not relative to the largest row.** A full bar (14 cells, fewer when
+the terminal is narrow) means the whole context, so a bar reads the same on every card and a 1%
+row never looks large just because nothing else is bigger. Any positive displayed share gets at
+least one cell. The bar saturates at 100% while the numeric percentage beside it stays uncapped,
+so a share above 100% shows a full bar and its true figure. The column keeps its full width even
+when every bar is short, so the scale stays visible.
+
 **The footer is the reported total, and the rows above it split into two kinds.** Items sum to
 `total`; the baseline is by definition what we *cannot* attribute to any item, so folding it into
 that sum would be self-contradictory. With a baseline the rows are the categories, then the
@@ -1158,15 +1165,14 @@ reasons (dropped events, compacted), no data, a 40-column terminal, and an over-
 label. Unit tests on `ContextCard` assert concrete share percentages, so the accounting is pinned
 independently of the rendering.
 
-### Known limitation: resumed and forked sessions
+### Resumed and forked sessions
 
-`thread/resume` and `thread/fork` carry no `experimental_raw_events` field, so the app-server
-subscribes those threads without the raw item and usage stream. Their profiler attaches
-`MidStream`, sees no items and no anchors, and `/ctx` renders the no-data card, which is correct
-for what it observed. Found in the M4 live check. Fix on its own branch after M4: add the field
-to both request types (serde default `false`), thread it through the resume and fork handlers
-to the same subscription call `thread/start` uses, and set it in the TUI's resume and fork param
-builders.
+`thread/resume` and `thread/fork` now carry `experimental_raw_events`, and the app-server honours
+it on all three subscription paths: cold resume, loaded-thread rejoin, and fork. The flag is
+per-thread and monotonic, exactly as it is for `thread/start` - once a thread has raw events it
+keeps them. A resumed thread still attaches `MidStream`, so its card attributes only the items
+observed after the attach; the restored history stays in `Not attributed` until hydration exists
+(M7).
 
 ### After dogfood (M6)
 
@@ -1335,6 +1341,9 @@ plaintext (`rollout-trace/README.md:3-8`).
 | M5 | Epochs and compaction: sealing, before/after, turns spanning a boundary, compaction-kind inference; surface core's `context_window_id` and `window_number` on the raw completed event | |
 | M6 | Dogfood on real work; validate attribution; find out which views are actually used; reconsider the JSONL trace after dogfooding | |
 | M7 | Rollout hydration - `RolloutItem` adapter, provenance, live-vs-rollout equivalence | |
+
+Resumed and forked threads now receive raw events, but a resumed thread's profiler attaches
+`MidStream` and leaves the restored history unattributed until M7 hydration lands.
 
 ### M2, staged
 

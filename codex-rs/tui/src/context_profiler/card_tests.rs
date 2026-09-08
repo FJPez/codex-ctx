@@ -63,7 +63,8 @@ fn assistant_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        internal_chat_message_metadata_passthrough: kinds("assistant.text"),
+        // Core stamps `unknown` on its own outputs, so live agent messages carry no usable kind.
+        internal_chat_message_metadata_passthrough: kinds("unknown"),
     }
 }
 
@@ -336,14 +337,14 @@ fn contributors_are_the_three_largest_groups() {
             Contributor {
                 rank: 2,
                 category: "Agent messages",
-                label: "assistant.text".to_string(),
+                label: "Message".to_string(),
                 tokens: TokenCost::Estimated(756),
                 share_percent: Some(3),
             },
             Contributor {
                 rank: 3,
                 category: "Agent messages",
-                label: "assistant.text".to_string(),
+                label: "Message".to_string(),
                 tokens: TokenCost::Exact(400),
                 share_percent: Some(2),
             },

@@ -30,10 +30,13 @@ use codex_app_server_protocol::FileChangeRequestApprovalResponse;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::McpToolCallAppContext;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
+use codex_app_server_protocol::RawResponseCompletedNotification;
+use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::SandboxPolicy as AppSandboxPolicy;
@@ -5865,6 +5868,213 @@ async fn thread_resume_accepts_personality_override() -> Result<()> {
         instructions_text.contains(CODEX_5_2_INSTRUCTIONS_TEMPLATE_DEFAULT),
         "expected default base instructions from history, got {instructions_text:?}"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cold_thread_resume_with_raw_events_emits_raw_notifications() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
+
+    let conversation_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: conversation_id.clone(),
+            experimental_raw_events: true,
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+
+    let turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "cold resume raw events".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let TurnStartResponse { turn } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_id)).await??;
+
+    let raw_item = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification::<RawResponseItemCompletedNotification>("rawResponseItem/completed"),
+    )
+    .await??;
+    assert_eq!(raw_item.thread_id, thread.id);
+    assert_eq!(raw_item.turn_id, turn.id);
+
+    let raw_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification::<RawResponseCompletedNotification>("rawResponse/completed"),
+    )
+    .await??;
+    assert_eq!(raw_response.thread_id, thread.id);
+    assert_eq!(raw_response.turn_id, turn.id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn loaded_thread_resume_with_raw_events_emits_raw_notifications() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let start_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .await?;
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
+
+    let first_turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "materialize rollout".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(first_turn_id)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    // Rejoin the still-loaded thread, opting into raw events this time.
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            exclude_turns: true,
+            experimental_raw_events: true,
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse {
+        thread: resumed, ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    assert_eq!(resumed.id, thread.id);
+
+    let turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "loaded resume raw events".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let TurnStartResponse { turn } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_id)).await??;
+
+    let raw_item = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification::<RawResponseItemCompletedNotification>("rawResponseItem/completed"),
+    )
+    .await??;
+    assert_eq!(raw_item.thread_id, thread.id);
+    assert_eq!(raw_item.turn_id, turn.id);
+
+    let raw_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification::<RawResponseCompletedNotification>("rawResponse/completed"),
+    )
+    .await??;
+    assert_eq!(raw_response.thread_id, thread.id);
+    assert_eq!(raw_response.turn_id, turn.id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_resume_without_raw_events_emits_no_raw_notifications() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
+
+    let conversation_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: conversation_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+
+    let turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "no raw events".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_id)),
+    )
+    .await??;
+
+    // Inspect every message so raw notifications cannot be skipped silently.
+    loop {
+        let message = timeout(DEFAULT_READ_TIMEOUT, mcp.read_next_message()).await??;
+        let JSONRPCMessage::Notification(notification) = message else {
+            continue;
+        };
+        assert_ne!(notification.method, "rawResponseItem/completed");
+        assert_ne!(notification.method, "rawResponse/completed");
+        if notification.method == "turn/completed" {
+            break;
+        }
+    }
 
     Ok(())
 }

@@ -1214,6 +1214,89 @@ async fn primary_thread_requests_raw_events_when_feature_enabled() -> Result<()>
 }
 
 #[tokio::test]
+async fn resumed_thread_requests_raw_events_when_feature_enabled() -> Result<()> {
+    let (mut app, codex_home) = make_history_test_app().await?;
+    app.config
+        .features
+        .enable(Feature::ContextProfiler)
+        .expect("test config should allow the context profiler");
+    let thread_id = ThreadId::from_string(
+        &create_fake_rollout(
+            codex_home.path(),
+            "2026-01-01T00-00-00",
+            "2026-01-01T00:00:00Z",
+            "Saved user message",
+            Some(app.config.model_provider_id.as_str()),
+            /*git_info*/ None,
+        )
+        .expect("create rollout"),
+    )?;
+    let (mut app_server, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+
+    app_server
+        .resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            thread_id,
+            crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+        )
+        .await?;
+
+    let resumes = recorded_params(&requests, "thread/resume");
+    let params: codex_app_server_protocol::ThreadResumeParams =
+        serde_json::from_value(resumes[0].clone())?;
+    assert!(params.experimental_raw_events);
+
+    app_server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn forked_thread_requests_raw_events_when_feature_enabled() -> Result<()> {
+    let (mut app, codex_home) = make_history_test_app().await?;
+    app.config
+        .features
+        .enable(Feature::ContextProfiler)
+        .expect("test config should allow the context profiler");
+    let thread_id = ThreadId::from_string(
+        &create_fake_rollout(
+            codex_home.path(),
+            "2026-01-01T00-00-00",
+            "2026-01-01T00:00:00Z",
+            "Saved user message",
+            Some(app.config.model_provider_id.as_str()),
+            /*git_info*/ None,
+        )
+        .expect("create rollout"),
+    )?;
+    let (mut app_server, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+
+    app_server
+        .fork_thread(&app.local_settings, app.config.clone(), thread_id)
+        .await?;
+
+    let forks = recorded_params(&requests, "thread/fork");
+    let params: codex_app_server_protocol::ThreadForkParams =
+        serde_json::from_value(forks[0].clone())?;
+    assert!(params.experimental_raw_events);
+
+    app_server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn only_a_fresh_thread_start_installs_a_profiler_eagerly() -> Result<()> {
     let (mut app, codex_home) = make_history_test_app().await?;
     app.config

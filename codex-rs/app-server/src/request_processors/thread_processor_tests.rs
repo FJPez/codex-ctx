@@ -677,6 +677,7 @@ mod thread_processor_behavior_tests {
             personality: None,
             exclude_turns: false,
             initial_turns_page: None,
+            experimental_raw_events: false,
         };
         let config_snapshot = ThreadConfigSnapshot {
             model: "gpt-5".to_string(),
@@ -1305,8 +1306,9 @@ mod thread_processor_behavior_tests {
 
         assert!(
             manager
-                .try_add_connection_to_thread(thread_id, connection_b)
+                .try_ensure_connection_subscribed(thread_id, connection_b, /*raw*/ false)
                 .await
+                .is_some()
         );
         tokio::time::timeout(Duration::from_secs(1), has_connections.changed())
             .await
@@ -1329,8 +1331,9 @@ mod thread_processor_behavior_tests {
         let attach_connection = async {
             tokio::task::yield_now().await;
             manager
-                .try_add_connection_to_thread(thread_id, connection)
+                .try_ensure_connection_subscribed(thread_id, connection, /*raw*/ false)
                 .await
+                .is_some()
         };
         let ((), attached) = tokio::time::timeout(Duration::from_secs(1), async {
             tokio::join!(wait_for_subscriber, attach_connection)
@@ -1404,26 +1407,19 @@ mod thread_processor_behavior_tests {
             .connection_initialized(unsupported_connection, ConnectionCapabilities::default())
             .await;
 
-        assert!(
-            manager
-                .try_add_connection_to_thread(other_thread_id, unrelated_supported_connection)
-                .await
-        );
-        assert!(
-            manager
-                .try_add_connection_to_thread(thread_id, later_supported_connection)
-                .await
-        );
-        assert!(
-            manager
-                .try_add_connection_to_thread(thread_id, earlier_supported_connection)
-                .await
-        );
-        assert!(
-            manager
-                .try_add_connection_to_thread(thread_id, unsupported_connection)
-                .await
-        );
+        for (target, connection) in [
+            (other_thread_id, unrelated_supported_connection),
+            (thread_id, later_supported_connection),
+            (thread_id, earlier_supported_connection),
+            (thread_id, unsupported_connection),
+        ] {
+            assert!(
+                manager
+                    .try_ensure_connection_subscribed(target, connection, /*raw*/ false)
+                    .await
+                    .is_some()
+            );
+        }
 
         assert_eq!(
             manager

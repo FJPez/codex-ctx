@@ -13,10 +13,10 @@ expression: "render(&normal_state(), 80)"
 │   ↳ measured: first request = 20,000 input tokens        │
 │                                                          │
 │ Attributed to items     share of context                 │
-│   Agent messages            ~1,156    5%  ██████████████ │
-│   Tool outputs                 800    3%  ████████       │
-│   Tool calls                  ~573    2%  ██████         │
-│   Instructions                ~227    1%  ███            │
+│   Agent messages            ~1,156    5%  █              │
+│   Tool outputs                 800    3%  █              │
+│   Tool calls                  ~573    2%  █              │
+│   Instructions                ~227    1%  █              │
 │   Reasoning                    ~71    0%                 │
 │   User messages                ~34    0%                 │
 │ ────────────────────────────────────────                 │
@@ -28,9 +28,9 @@ expression: "render(&normal_state(), 80)"
 │   Reported context          23,000  100%                 │
 │                                                          │
 │ Largest contributors (estimated)                         │
-│   1  Tool calls      read_file       ~1,373    6%        │
-│   2  Agent messages  assistant.text    ~756    3%        │
-│   3  Agent messages  assistant.text     400    2%        │
+│   1  Tool calls      read_file  ~1,373    6%             │
+│   2  Agent messages  Message      ~756    3%             │
+│   3  Agent messages  Message       400    2%             │
 │                                                          │
 │ Last 2 turns   added  context                            │
 │   2           +2,200   23,000                            │
