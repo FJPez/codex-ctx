@@ -689,9 +689,14 @@ pub(super) async fn handle_pending_thread_resume_request(
                 .await;
             return;
         }
-        if !thread_state_manager
-            .try_add_connection_to_thread(conversation_id, connection_id)
+        if thread_state_manager
+            .try_ensure_connection_subscribed(
+                conversation_id,
+                connection_id,
+                pending.experimental_raw_events,
+            )
             .await
+            .is_none()
         {
             tracing::debug!(
                 thread_id = %conversation_id,

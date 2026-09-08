@@ -18,6 +18,8 @@ use codex_app_server_protocol::DeprecationNoticeNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::RawResponseCompletedNotification;
+use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::SandboxPolicy;
@@ -2538,6 +2540,68 @@ async fn pathless_ephemeral_thread_rejects_codex_home_path_after_reload() -> Res
         "fork should reject the directory before rollout reading: {}",
         fork_err.error.message
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_fork_with_raw_events_emits_raw_notifications() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let conversation_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: conversation_id.clone(),
+            experimental_raw_events: true,
+            ..Default::default()
+        })
+        .await?;
+    let ThreadForkResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
+
+    let turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "forked raw events".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let TurnStartResponse { turn } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_id)).await??;
+
+    let raw_item = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification::<RawResponseItemCompletedNotification>("rawResponseItem/completed"),
+    )
+    .await??;
+    assert_eq!(raw_item.thread_id, thread.id);
+    assert_eq!(raw_item.turn_id, turn.id);
+
+    let raw_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification::<RawResponseCompletedNotification>("rawResponse/completed"),
+    )
+    .await??;
+    assert_eq!(raw_response.thread_id, thread.id);
+    assert_eq!(raw_response.turn_id, turn.id);
 
     Ok(())
 }

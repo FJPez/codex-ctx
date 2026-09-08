@@ -52,6 +52,8 @@ pub(crate) struct PendingThreadResumeRequest {
         Option<codex_app_server_protocol::TurnsPage>,
     pub(crate) resume_cursor_store: Option<Arc<dyn codex_thread_store::ThreadStore>>,
     pub(crate) redact_resume_payloads: bool,
+    /// Raw event opt-in carried from the resume params so the rejoining connection subscribes to them.
+    pub(crate) experimental_raw_events: bool,
 }
 
 // ThreadListenerCommand is used to perform operations in the context of the thread listener, for serialization purposes.
@@ -561,6 +563,7 @@ impl ThreadStateManager {
         Some(thread_state)
     }
 
+    #[cfg(test)]
     pub(crate) async fn try_add_connection_to_thread(
         &self,
         thread_id: ThreadId,
