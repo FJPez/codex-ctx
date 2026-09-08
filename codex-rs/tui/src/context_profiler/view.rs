@@ -299,12 +299,6 @@ fn attributed_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>
         return Vec::new();
     }
     let widths = table_widths(card, inner_width);
-    let largest_share = card
-        .categories
-        .iter()
-        .filter_map(|row| row.share_percent)
-        .max()
-        .unwrap_or(0);
 
     let mut heading = vec!["Attributed to items".bold()];
     if widths.share > 0 {
@@ -319,11 +313,7 @@ fn attributed_block(card: &ContextCard, inner_width: usize) -> Vec<Line<'static>
     let bar_cells = inner_width.saturating_sub(widths.row_width() + GAP);
     let mut lines: Vec<Line<'static>> = vec![heading.into()];
     for row in &card.categories {
-        lines.push(table_row(
-            row,
-            &widths,
-            bar(row.share_percent, largest_share, bar_cells),
-        ));
+        lines.push(table_row(row, &widths, bar(row.share_percent, bar_cells)));
     }
     lines.push(rule(&widths));
     lines.push(number_row(
@@ -567,15 +557,20 @@ fn rule(widths: &TableWidths) -> Line<'static> {
     "\u{2500}".repeat(widths.row_width()).dim().into()
 }
 
-/// The bar scales to whatever room is left, so shares stay comparable at any width.
-fn bar(share: Option<u32>, largest: u32, max_cells: usize) -> Option<String> {
+/// A full bar is the whole context, so bars mean the same thing on every card; any non-zero
+/// share gets at least one cell, and the column keeps its full width so the scale is visible.
+fn bar(share: Option<u32>, max_cells: usize) -> Option<String> {
     let share = share?;
     let full = BAR_CELLS.min(max_cells);
-    if share == 0 || largest == 0 || full == 0 {
+    if share == 0 || full == 0 {
         return None;
     }
-    let cells = (f64::from(share) / f64::from(largest) * full as f64).round() as usize;
-    Some("\u{2588}".repeat(cells.max(1)))
+    let cells = ((f64::from(share.min(100)) / 100.0 * full as f64).round() as usize).max(1);
+    Some(format!(
+        "{}{}",
+        "\u{2588}".repeat(cells),
+        " ".repeat(full - cells)
+    ))
 }
 
 fn added_text(turn: &TurnRow) -> String {
