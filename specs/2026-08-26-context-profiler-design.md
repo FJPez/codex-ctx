@@ -1158,15 +1158,14 @@ reasons (dropped events, compacted), no data, a 40-column terminal, and an over-
 label. Unit tests on `ContextCard` assert concrete share percentages, so the accounting is pinned
 independently of the rendering.
 
-### Known limitation: resumed and forked sessions
+### Resumed and forked sessions
 
-`thread/resume` and `thread/fork` carry no `experimental_raw_events` field, so the app-server
-subscribes those threads without the raw item and usage stream. Their profiler attaches
-`MidStream`, sees no items and no anchors, and `/ctx` renders the no-data card, which is correct
-for what it observed. Found in the M4 live check. Fix on its own branch after M4: add the field
-to both request types (serde default `false`), thread it through the resume and fork handlers
-to the same subscription call `thread/start` uses, and set it in the TUI's resume and fork param
-builders.
+`thread/resume` and `thread/fork` now carry `experimental_raw_events`, and the app-server honours
+it on all three subscription paths: cold resume, loaded-thread rejoin, and fork. The flag is
+per-thread and monotonic, exactly as it is for `thread/start` - once a thread has raw events it
+keeps them. A resumed thread still attaches `MidStream`, so its card attributes only the items
+observed after the attach; the restored history stays in `Not attributed` until hydration exists
+(M7).
 
 ### After dogfood (M6)
 
@@ -1335,6 +1334,9 @@ plaintext (`rollout-trace/README.md:3-8`).
 | M5 | Epochs and compaction: sealing, before/after, turns spanning a boundary, compaction-kind inference; surface core's `context_window_id` and `window_number` on the raw completed event | |
 | M6 | Dogfood on real work; validate attribution; find out which views are actually used; reconsider the JSONL trace after dogfooding | |
 | M7 | Rollout hydration - `RolloutItem` adapter, provenance, live-vs-rollout equivalence | |
+
+Resumed and forked threads now receive raw events, but a resumed thread's profiler attaches
+`MidStream` and leaves the restored history unattributed until M7 hydration lands.
 
 ### M2, staged
 

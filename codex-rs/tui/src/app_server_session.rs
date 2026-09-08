@@ -981,6 +981,8 @@ impl AppServerSession {
             before_turn_id,
             defer_goal_continuation: goal_continuation == ForkGoalContinuation::DeferUntilNextTurn,
             exclude_turns,
+            experimental_raw_events: config.features.enabled(Feature::ContextProfiler)
+                && presentation == ForkPresentation::Regular,
             ..thread_fork_params_from_config(
                 session_config,
                 thread_id,

@@ -16,6 +16,7 @@ use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::Result;
@@ -116,6 +117,7 @@ impl AppServerSession {
         );
         self.thread_tool_transport()
             .configure_mcp(&mut params.config);
+        params.experimental_raw_events = config.features.enabled(Feature::ContextProfiler);
         let mut rollout_maintenance_guard = None;
         params.exclude_turns = if self.history_support == ThreadHistorySupport::Paginated {
             let known_legacy_history = self
