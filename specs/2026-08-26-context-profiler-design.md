@@ -1491,9 +1491,14 @@ could not complete on this machine within memory).
 **Workload assumption.** A synthetic session shaped like the recorded traces: about three items
 per usage anchor and three to four anchors per turn, each turn a user message, two reasoning
 items, two tool call/output pairs of 0.6-3 KB, an assistant message, and an instruction fragment
-every fourth turn. The traces themselves are short check sessions (at most 42 items, 13
-anchors), so "5,000 items is a long day" is an extrapolation: at ~12 items per turn it is roughly
-400 turns. 20,000 is a stress point, not a target.
+every fourth turn, 8.25 items per turn on average, so 5,000 items is about 606 synthetic turns.
+The traces themselves are short check sessions (at most 42 items, 13 anchors), so "5,000 items
+is a long day" is an extrapolation. 20,000 is a stress point, not a target.
+
+The `item` column is the first item appended to a freshly cloned, completed session: the clone
+has no spare vector capacity, so every sample includes growing the item vector, and the closed
+turn means it also opens an implicit turn. A live session pays the growth only occasionally; the
+ingest column contains the natural mix.
 
 | items in history | one item (median) | one anchor (median) | ingest whole session | card build (debug, median) | card render at 80 cols (debug, median) |
 |---|---|---|---|---|---|
@@ -1503,17 +1508,20 @@ anchors), so "5,000 items is a long day" is an extrapolation: at ~12 items per t
 | 10,000 | 1.06 ms | 1.11 ms | 7.4 s | 2.6 ms | 0.42 ms |
 | 20,000 | 2.9 ms | 2.5 ms | 29.6 s | 5.5 ms | 0.42 ms |
 
-**Reading.** Per-event cost is linear in the retained history, about 100 ns per item, for both
-items and anchors: that is `rebuild_aggregates` after every event plus the anchor scans
-(`positions`, `span_is_ambiguous`). Ingest is therefore quadratic: 1.9 s spread over a
-5,000-item day, 30 s over a 20,000-item session. Card build is linear (sorting and summing
-groups) and render is flat, since the card draws a fixed set of blocks whatever the history size.
+**Reading.** Observed per-event cost scales linearly with the retained history, about 100 ns per
+item, for both items and anchors. That is consistent with the per-event passes the code makes
+(`rebuild_aggregates` after every event, `positions` and `span_is_ambiguous` at every anchor),
+but a whole-event timing does not apportion the cost between those passes, allocation, and the
+rest; that would need a profiler. Ingest is correspondingly quadratic: 1.9 s spread over a
+5,000-item session, 30 s over 20,000. Card build scales roughly linearly over this range (the
+algorithm sorts groups, so it is n log n) and render is flat, since the card draws a fixed set of
+blocks whatever the history size.
 
 **Outcome.** At the realistic size every figure is under its investigation trigger (item under
 1 ms, anchor under 5 ms, build plus render under 50 ms), so the current approach stays as it is
-and this question is closed. The linear-per-event growth is recorded as the limitation: at
-20,000 items each event costs about 3 ms and the session's cumulative fold reaches half a
-minute. That is the input to M5's retention design, not a reason to optimise now; on-demand
+and this question is closed. The observed linear-per-event growth is recorded as the
+limitation: at 20,000 items each event costs about 3 ms and the session's cumulative fold
+reaches half a minute. That is the input to M5's retention design, not a reason to optimise now; on-demand
 aggregates at `/ctx` time may prove simpler than maintaining them incrementally. Rerun both
 measurements after M5 for the comparison.
 
