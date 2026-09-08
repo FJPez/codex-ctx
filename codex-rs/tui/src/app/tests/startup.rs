@@ -1074,6 +1074,7 @@ async fn fresh_startup_notice_follows_session_attachment() {
             turns: Vec::new(),
             blocks_direct_input: false,
             task_tools_available: false,
+            freshly_started: true,
         }),
     )
     .await
