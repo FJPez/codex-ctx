@@ -563,27 +563,6 @@ impl ThreadStateManager {
         Some(thread_state)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn try_add_connection_to_thread(
-        &self,
-        thread_id: ThreadId,
-        connection_id: ConnectionId,
-    ) -> bool {
-        let mut state = self.state.lock().await;
-        if !state.live_connections.contains_key(&connection_id) {
-            return false;
-        }
-        state
-            .thread_ids_by_connection
-            .entry(connection_id)
-            .or_default()
-            .insert(thread_id);
-        let thread_entry = state.threads.entry(thread_id).or_default();
-        thread_entry.connection_ids.insert(connection_id);
-        thread_entry.update_has_connections();
-        true
-    }
-
     pub(crate) async fn remove_connection(&self, connection_id: ConnectionId) -> Vec<ThreadId> {
         {
             let mut state = self.state.lock().await;
